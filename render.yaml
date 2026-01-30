@@ -1,9 +1,0 @@
-services:
-  - type: worker
-    name: finishflow-worker
-    env: docker
-    plan: standard
-    dockerfilePath: ./Dockerfile
-    envVars:
-      - key: OPENAI_API_KEY
-        sync: false
