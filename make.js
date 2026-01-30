@@ -1,68 +1,93 @@
-import fs from "fs";
-import path from "path";
-import { execFile } from "child_process";
-import OpenAI from "openai";
+import express from "express";
+import cors from "cors";
+import { make } from "./make.js";
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const app = express();
+app.use(cors());
+app.use(express.json({ limit: "2mb" }));
 
-function run(cmd, args) {
-  return new Promise((resolve, reject) => {
-    execFile(cmd, args, (err, stdout, stderr) => {
-      if (err) return reject(new Error(stderr || err.message));
-      resolve({ stdout, stderr });
-    });
+const PORT = process.env.PORT || 3000;
+const ROLE = process.env.ROLE || "gateway"; // "gateway" | "worker"
+const WORKER_URL = process.env.WORKER_URL;  // gateway에서만 필요
+
+// 공통 헬스체크
+app.get("/health", (req, res) => res.json({ ok: true, role: ROLE }));
+
+/**
+ * WORKER 역할:
+ * - /make를 직접 수행 (TTS + ffmpeg)
+ * - 결과를 "mp4 바이너리"로 반환
+ */
+if (ROLE === "worker") {
+  app.post("/make", async (req, res) => {
+    try {
+      const topic = String(req.body?.topic || "").trim();
+      if (!topic) return res.status(400).json({ ok: false, error: "topic required" });
+
+      // make()는 mp4 생성까지 수행하도록 이미 구성되어 있어야 함
+      // (현재 make.js가 step4 mp4 생성 버전이어야 함)
+      const result = await make(topic);
+
+      // 워커는 결과 JSON만 돌려주는 대신, mp4를 바로 내려주는 것이 가장 단순/확실
+      // make.js가 /tmp/final.mp4를 만든다는 전제
+      const fs = await import("fs");
+      const videoPath = "/tmp/final.mp4";
+
+      if (!fs.existsSync(videoPath)) {
+        return res.status(500).json({ ok: false, error: "final.mp4 not found" });
+      }
+
+      res.setHeader("Content-Type", "video/mp4");
+      res.setHeader("X-FinishFlow-Step", String(result.step || 4));
+      res.setHeader("X-FinishFlow-Topic", encodeURIComponent(topic));
+      fs.createReadStream(videoPath).pipe(res);
+    } catch (e) {
+      res.status(500).json({ ok: false, error: e?.message || "worker error" });
+    }
   });
 }
 
-export async function make(topic) {
-  if (!process.env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY missing");
+/**
+ * GATEWAY 역할:
+ * - /make 요청을 Worker로 프록시
+ * - Worker가 돌려준 mp4 바이너리를 그대로 클라이언트에게 스트리밍
+ */
+if (ROLE === "gateway") {
+  app.post("/make", async (req, res) => {
+    try {
+      if (!WORKER_URL) return res.status(500).json({ ok: false, error: "WORKER_URL missing" });
 
-  const script = `오늘의 주제입니다.\n${topic}\n차분하고 명확하게 설명합니다.`;
+      const topic = String(req.body?.topic || "").trim();
+      if (!topic) return res.status(400).json({ ok: false, error: "topic required" });
 
-  const outDir = "/tmp";
-  const audioPath = path.join(outDir, "voice.mp3");
-  const videoPath = path.join(outDir, "final.mp4");
+      const r = await fetch(`${WORKER_URL.replace(/\/$/, "")}/make`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ topic }),
+      });
 
-  // 1) TTS -> mp3
-  const speech = await openai.audio.speech.create({
-    model: "gpt-4o-mini-tts",
-    voice: "alloy",
-    input: script
+      if (!r.ok) {
+        const text = await r.text().catch(() => "");
+        return res.status(502).json({ ok: false, error: `worker ${r.status}`, detail: text.slice(0, 500) });
+      }
+
+      // worker는 video/mp4를 반환
+      res.setHeader("Content-Type", "video/mp4");
+      // worker가 주는 헤더(디버그용) 전달
+      const step = r.headers.get("x-finishflow-step");
+      const t = r.headers.get("x-finishflow-topic");
+      if (step) res.setHeader("X-FinishFlow-Step", step);
+      if (t) res.setHeader("X-FinishFlow-Topic", t);
+
+      // 스트리밍 전달
+      const buf = Buffer.from(await r.arrayBuffer());
+      res.send(buf);
+    } catch (e) {
+      res.status(500).json({ ok: false, error: e?.message || "gateway error" });
+    }
   });
-
-  const buffer = Buffer.from(await speech.arrayBuffer());
-  fs.writeFileSync(audioPath, buffer);
-
-  // 2) mp3 -> mp4 (solid background + audio)
-  await run("ffmpeg", [
-    "-y",
-    "-f",
-    "lavfi",
-    "-i",
-    "color=c=black:s=1280x720:r=30",
-    "-i",
-    audioPath,
-    "-shortest",
-    "-c:v",
-    "libx264",
-    "-preset",
-    "veryfast",
-    "-tune",
-    "stillimage",
-    "-c:a",
-    "aac",
-    "-b:a",
-    "192k",
-    "-pix_fmt",
-    "yuv420p",
-    videoPath
-  ]);
-
-  return {
-    ok: true,
-    step: 4,
-    topic,
-    audio_generated: true,
-    video_generated: true
-  };
 }
+
+app.listen(PORT, () => {
+  console.log(`FinishFlow ${ROLE} listening on ${PORT}`);
+});
