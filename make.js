@@ -1,151 +1,299 @@
-const fs = require("fs");
-const path = require("path");
-const os = require("os");
-const crypto = require("crypto");
-const { spawn } = require("child_process");
+import crypto from "crypto";
+import fs from "fs";
+import os from "os";
+import path from "path";
+import { spawn } from "child_process";
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
-const TTS_MODEL = process.env.TTS_MODEL || "gpt-4o-mini-tts"; // 바뀌면 Render env에서만 수정
+// ====== in-memory token store (TTL) ======
+const tokenStore = new Map(); // token -> { filePath, expiresAt }
+const TTL_MS = 30 * 60 * 1000; // 30 minutes
 
-// 메모리 토큰 저장 (서버 재시작되면 초기화됨)
-const tokenStore = new Map();
+function putToken(token, filePath) {
+  const expiresAt = Date.now() + TTL_MS;
+  tokenStore.set(token, { filePath, expiresAt });
 
-/** 안전: ffmpeg 존재 확인 */
-async function assertFfmpeg() {
-  await new Promise((resolve, reject) => {
-    const p = spawn("ffmpeg", ["-version"]);
-    let out = "";
-    p.stdout.on("data", (d) => (out += d.toString()));
+  // best-effort cleanup
+  for (const [k, v] of tokenStore.entries()) {
+    if (v.expiresAt < Date.now()) tokenStore.delete(k);
+  }
+}
+
+export function getDownloadPathByToken(token) {
+  const v = tokenStore.get(token);
+  if (!v) return null;
+  if (v.expiresAt < Date.now()) {
+    tokenStore.delete(token);
+    return null;
+  }
+  return v.filePath;
+}
+
+// ====== helpers ======
+function run(cmd, args, { timeoutMs = 120000 } = {}) {
+  return new Promise((resolve, reject) => {
+    const p = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"] });
+
+    let stdout = "";
+    let stderr = "";
+
+    const timer = setTimeout(() => {
+      try {
+        p.kill("SIGKILL");
+      } catch {}
+      reject(new Error(`${cmd} timeout after ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    p.stdout.on("data", (d) => (stdout += d.toString()));
+    p.stderr.on("data", (d) => (stderr += d.toString()));
+
     p.on("close", (code) => {
-      if (code === 0) return resolve();
-      reject(new Error("ffmpeg not available"));
+      clearTimeout(timer);
+      if (code === 0) return resolve({ stdout, stderr });
+      reject(
+        new Error(
+          `${cmd} failed (code=${code}). stderr:\n${stderr}\nstdout:\n${stdout}`
+        )
+      );
     });
-    p.on("error", reject);
   });
 }
 
-/** OpenAI TTS (npm openai 패키지 없이 fetch로 직접 호출) */
-async function generateAudioMp3(text, outPath) {
-  if (!OPENAI_API_KEY) {
-    // 키가 없으면 “빈 파일” 만들지 말고 실패 처리
-    throw new Error("OPENAI_API_KEY is missing");
-  }
+function safeFileName(s) {
+  return s.replace(/[^a-zA-Z0-9-_]/g, "").slice(0, 40) || "x";
+}
 
-  const resp = await fetch("https://api.openai.com/v1/audio/speech", {
+// 간단 전처리(발음 개선 최소치)
+function preprocessKoreanTTS(text) {
+  let t = text;
+
+  // 숫자/기호 기본 정리(최소)
+  t = t.replace(/~/g, "에서 ");
+  t = t.replace(/\bAI\b/gi, "에이아이");
+  t = t.replace(/\s+/g, " ").trim();
+
+  // 너무 긴 문장 쪼개기: 마침표/물음표/느낌표 기준
+  // (OpenAI TTS가 긴 문장에 약한 케이스 완화)
+  const parts = t
+    .split(/(?<=[\.\!\?]|다\.)\s+/)
+    .map((x) => x.trim())
+    .filter(Boolean);
+
+  // 부분을 다시 합치되, 쉼표를 넣어 호흡 유도
+  return parts.join(", ");
+}
+
+// ====== OpenAI calls via HTTPS (no SDK dependency) ======
+async function openaiJSON(url, body) {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) throw new Error("OPENAI_API_KEY is not set in Render Environment");
+
+  const r = await fetch(url, {
     method: "POST",
     headers: {
-      "Authorization": `Bearer ${OPENAI_API_KEY}`,
+      Authorization: `Bearer ${apiKey}`,
       "Content-Type": "application/json"
     },
-    body: JSON.stringify({
-      model: TTS_MODEL,
-      voice: "alloy",
-      format: "mp3",
-      input: text
-    })
+    body: JSON.stringify(body)
   });
 
-  if (!resp.ok) {
-    const t = await resp.text().catch(() => "");
-    throw new Error(`OpenAI TTS failed: ${resp.status} ${t}`);
+  if (!r.ok) {
+    const text = await r.text().catch(() => "");
+    throw new Error(`OpenAI error ${r.status}: ${text.slice(0, 500)}`);
   }
-
-  const buf = Buffer.from(await resp.arrayBuffer());
-  fs.writeFileSync(outPath, buf);
-  const size = fs.statSync(outPath).size;
-  if (size < 5_000) throw new Error("TTS produced too-small audio (failed)");
+  return r.json();
 }
 
-/**
- * mp3 -> mp4
- * - 검은 배경 + 오디오
- * - 재생성 보장 옵션 포함
- */
-async function makePlayableMp4(mp3Path, mp4Path) {
-  // 오디오 길이에 맞춰 영상 생성 (검은 화면 + 오디오)
-  // -movflags +faststart : 웹 스트리밍/다운로드 재생 안정
-  // -pix_fmt yuv420p     : 호환성 최상
-  // -c:a aac             : 대부분 플레이어 호환
+async function openaiBinary(url, body) {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) throw new Error("OPENAI_API_KEY is not set in Render Environment");
+
+  const r = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(body)
+  });
+
+  if (!r.ok) {
+    const text = await r.text().catch(() => "");
+    throw new Error(`OpenAI error ${r.status}: ${text.slice(0, 500)}`);
+  }
+  const ab = await r.arrayBuffer();
+  return Buffer.from(ab);
+}
+
+// 스크립트 생성: (안전한 “짧고 명확” 톤)
+async function generateScript(topic) {
+  // Chat Completions (안정적)
+  const data = await openaiJSON("https://api.openai.com/v1/chat/completions", {
+    model: "gpt-4o-mini",
+    messages: [
+      {
+        role: "system",
+        content:
+          "You write Korean voiceover scripts that sound natural for middle-aged/older audiences. Keep it calm, clear, and practical. Avoid hype."
+      },
+      {
+        role: "user",
+        content: `주제: "${topic}"\n\n요구사항:\n- 45~60초 분량\n- 문장 짧게\n- 어려운 용어 금지\n- 마지막은 행동 1가지로 끝내기\n\n스크립트만 출력`
+      }
+    ],
+    temperature: 0.4
+  });
+
+  const text = (data?.choices?.[0]?.message?.content || "").trim();
+  if (!text) throw new Error("Empty script from OpenAI");
+  return text;
+}
+
+// TTS 생성 (mp3)
+// 모델/보이스는 계정/정책에 따라 다를 수 있어, 가장 범용인 tts-1 사용
+async function generateTTSMp3(scriptText) {
+  const cleaned = preprocessKoreanTTS(scriptText);
+
+  const mp3 = await openaiBinary("https://api.openai.com/v1/audio/speech", {
+    model: "tts-1",
+    voice: "alloy",
+    format: "mp3",
+    speed: 0.97,
+    input: cleaned
+  });
+
+  return { mp3, cleaned };
+}
+
+// ffprobe로 오디오 길이(초) 구하기
+async function getDurationSeconds(audioPath) {
+  const { stdout } = await run(
+    "ffprobe",
+    [
+      "-v",
+      "error",
+      "-show_entries",
+      "format=duration",
+      "-of",
+      "default=noprint_wrappers=1:nokey=1",
+      audioPath
+    ],
+    { timeoutMs: 60000 }
+  );
+
+  const s = stdout.trim();
+  const val = Number(s);
+  if (!Number.isFinite(val) || val <= 0) {
+    throw new Error(`Invalid duration from ffprobe: "${s}"`);
+  }
+
+  // 너무 짧아지지 않게 최소 3초 보정
+  return Math.max(3, val);
+}
+
+// ffmpeg로 “오디오 길이만큼” 영상 만들기
+async function renderMp4({ title, audioPath, outPath, durationSec }) {
+  // 배경: black 1280x720, 30fps, durationSec
+  // 텍스트: 제목 중앙
+  // 오디오: AAC 192k
+  const draw = `drawtext=fontcolor=white:fontsize=52:text='${title
+    .replace(/'/g, "’")
+    .slice(0, 22)}':x=(w-text_w)/2:y=(h-text_h)/2`;
+
   const args = [
     "-y",
-    "-f", "lavfi",
-    "-i", "color=c=black:s=1280x720:r=30",
-    "-i", mp3Path,
+    "-f",
+    "lavfi",
+    "-i",
+    `color=c=black:s=1280x720:r=30:d=${durationSec}`,
+    "-i",
+    audioPath,
+    "-vf",
+    draw,
+    "-c:v",
+    "libx264",
+    "-pix_fmt",
+    "yuv420p",
+    "-c:a",
+    "aac",
+    "-b:a",
+    "192k",
     "-shortest",
-    "-c:v", "libx264",
-    "-pix_fmt", "yuv420p",
-    "-tune", "stillimage",
-    "-c:a", "aac",
-    "-b:a", "192k",
-    "-movflags", "+faststart",
-    mp4Path
+    outPath
   ];
 
-  await new Promise((resolve, reject) => {
-    const p = spawn("ffmpeg", args, { stdio: ["ignore", "pipe", "pipe"] });
-    let err = "";
-    p.stderr.on("data", (d) => (err += d.toString()));
-    p.on("close", (code) => {
-      if (code === 0) return resolve();
-      reject(new Error("ffmpeg failed: " + err.slice(-2000)));
-    });
-    p.on("error", reject);
-  });
+  await run("ffmpeg", args, { timeoutMs: 240000 });
+}
 
-  const size = fs.statSync(mp4Path).size;
-  // ✅ “빈 mp4” 방지: 최소 크기 조건
-  if (size < 200_000) {
-    throw new Error(`mp4 too small (${size} bytes). Treat as failed.`);
+// mp4 유효성 체크 (스트림 존재 + 길이>2초)
+async function validateMp4(mp4Path) {
+  const { stdout } = await run(
+    "ffprobe",
+    [
+      "-v",
+      "error",
+      "-select_streams",
+      "v:0",
+      "-show_entries",
+      "stream=codec_name",
+      "-of",
+      "default=noprint_wrappers=1:nokey=1",
+      mp4Path
+    ],
+    { timeoutMs: 60000 }
+  );
+  if (!stdout.trim()) throw new Error("MP4 has no video stream");
+
+  const { stdout: durOut } = await run(
+    "ffprobe",
+    [
+      "-v",
+      "error",
+      "-show_entries",
+      "format=duration",
+      "-of",
+      "default=noprint_wrappers=1:nokey=1",
+      mp4Path
+    ],
+    { timeoutMs: 60000 }
+  );
+  const d = Number(durOut.trim());
+  if (!Number.isFinite(d) || d < 2.5) {
+    throw new Error(`MP4 duration too short: ${durOut.trim()}`);
   }
 }
 
-/** 토큰 생성 */
-function newToken() {
-  return crypto.randomBytes(16).toString("hex");
-}
-
-/** 주제 -> 간단 대본(지금은 최소 안정 버전) */
-function buildScript(topic) {
-  return [
-    `주제: ${topic}`,
-    "",
-    "핵심 3가지:",
-    "1) 수면을 먼저 고정한다 (매일 같은 시간)",
-    "2) 혈당 스파이크를 피한다 (단백질/채소 먼저)",
-    "3) 매일 20분 걷는다 (무리하지 않고 꾸준히)",
-    "",
-    "오늘부터 할 1가지:",
-    "오늘 잠드는 시간을 30분 앞당기고, 내일부터 7일만 유지해보세요."
-  ].join("\n");
-}
-
-/**
- * 메인: /make
- */
-async function makeVideoJob({ topic, req }) {
-  await assertFfmpeg();
-
+// ====== main: make video ======
+export async function makeVideo({ topic }) {
+  const id = crypto.randomBytes(6).toString("hex");
   const tmpDir = os.tmpdir();
-  const jobId = crypto.randomBytes(6).toString("hex");
-  const audioPath = path.join(tmpDir, `finishflow-${jobId}.mp3`);
-  const videoPath = path.join(tmpDir, `finishflow-${jobId}.mp4`);
 
-  const script = buildScript(topic);
+  const audioPath = path.join(tmpDir, `finishflow-${id}.mp3`);
+  const mp4Path = path.join(tmpDir, `finishflow-${id}.mp4`);
 
-  // 1) audio
-  await generateAudioMp3(script, audioPath);
+  // 1) script
+  const script = await generateScript(topic);
 
-  // 2) video
-  await makePlayableMp4(audioPath, videoPath);
+  // 2) tts
+  const { mp3, cleaned } = await generateTTSMp3(script);
+  fs.writeFileSync(audioPath, mp3);
 
-  // 3) token 저장(다운로드)
-  const token = newToken();
-  tokenStore.set(token, { videoPath, createdAt: Date.now() });
+  // 3) duration
+  const durationSec = await getDurationSeconds(audioPath);
 
-  // 4) 응답
-  const host = req.get("host");
-  const proto = (req.get("x-forwarded-proto") || "https").toString();
-  const downloadUrl = `${proto}://${host}/download?token=${token}`;
+  // 4) render mp4 (duration = audio duration)
+  await renderMp4({
+    title: topic,
+    audioPath,
+    outPath: mp4Path,
+    durationSec
+  });
+
+  // 5) validate playable mp4
+  await validateMp4(mp4Path);
+
+  // 6) token for download
+  const token = crypto.randomBytes(12).toString("hex");
+  putToken(token, mp4Path);
 
   return {
     ok: true,
@@ -153,31 +301,11 @@ async function makeVideoJob({ topic, req }) {
     topic,
     audio_generated: true,
     video_generated: true,
-    video_path: videoPath,
-    download_url: downloadUrl
+    video_path: mp4Path,
+    download_url: `/download?token=${token}`,
+    meta: {
+      duration_sec: Math.round(durationSec),
+      tts_input_preview: cleaned.slice(0, 120)
+    }
   };
 }
-
-/**
- * /download 토큰 처리: read stream 반환
- */
-async function getDownloadByToken(token) {
-  const rec = tokenStore.get(token);
-  if (!rec) return null;
-
-  // 파일 존재 확인
-  if (!fs.existsSync(rec.videoPath)) return null;
-
-  // (선택) 오래된 토큰 정리: 2시간 이상 삭제
-  const now = Date.now();
-  for (const [k, v] of tokenStore.entries()) {
-    if (now - v.createdAt > 2 * 60 * 60 * 1000) {
-      tokenStore.delete(k);
-      try { fs.unlinkSync(v.videoPath); } catch {}
-    }
-  }
-
-  return { stream: fs.createReadStream(rec.videoPath) };
-}
-
-module.exports = { makeVideoJob, getDownloadByToken };
