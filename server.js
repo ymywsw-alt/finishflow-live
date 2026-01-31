@@ -1,69 +1,114 @@
-import express from "express";
-import { makeVideo } from "./make.js";
+const express = require("express");
+const crypto = require("crypto");
+const path = require("path");
+const fs = require("fs");
+const { makeMp4 } = require("./make");
 
 const app = express();
-app.use(express.json({ limit: "2mb" }));
+app.use(express.json({ limit: "1mb" }));
 
-// 홈: 현재 서버가 무엇인지 보여주는 최소 화면
+// ---- in-memory file registry (token -> file path) ----
+const files = new Map(); // token -> { filePath, createdAt }
+
+function registerFile(filePath) {
+  const token = crypto.randomBytes(16).toString("hex");
+  files.set(token, { filePath, createdAt: Date.now() });
+  return token;
+}
+
+function cleanupOldFiles() {
+  const now = Date.now();
+  for (const [token, v] of files.entries()) {
+    // 20 minutes TTL
+    if (now - v.createdAt > 20 * 60 * 1000) {
+      try { fs.unlinkSync(v.filePath); } catch (_) {}
+      files.delete(token);
+    }
+  }
+}
+setInterval(cleanupOldFiles, 60 * 1000).unref();
+
 app.get("/", (req, res) => {
-  res
-    .status(200)
-    .type("html")
-    .send(`
-      <h2>FinishFlow (single service)</h2>
-      <p>POST /make  {"topic":"..."}  → generate mp4</p>
-      <p>GET  /health → {"ok":true}</p>
-      <p>GET  /download → download latest mp4</p>
-    `);
+  res.status(200).type("text/plain").send("FinishFlow OK. Use /health, POST /make, GET /download?token=...");
 });
 
-// 헬스체크
 app.get("/health", (req, res) => {
   res.json({ ok: true });
 });
 
-// 생성 API
+/**
+ * POST /make
+ * body: { "topic": "..." }
+ * response: { ok, step, topic, audio_generated, video_generated, video_path, download_url }
+ */
 app.post("/make", async (req, res) => {
   try {
-    const topic = (req.body?.topic || "").toString().trim();
+    const topic = (req.body && req.body.topic ? String(req.body.topic) : "").trim();
     if (!topic) {
-      return res.status(400).json({ ok: false, error: "topic is required" });
+      return res.status(400).json({ ok: false, reason: "missing_topic" });
     }
 
-    const result = await makeVideo({ topic });
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) {
+      return res.status(500).json({ ok: false, reason: "missing_OPENAI_API_KEY" });
+    }
 
+    const result = await makeMp4({ topic, apiKey });
+
+    if (!result.ok) {
+      // makeMp4 already includes reason + debug
+      return res.status(500).json(result);
+    }
+
+    const token = registerFile(result.video_path);
     return res.json({
       ok: true,
-      step: result.step,
-      topic: result.topic,
-      audio_generated: result.audio_generated,
-      video_generated: result.video_generated,
+      step: 4,
+      topic,
+      audio_generated: true,
+      video_generated: true,
       video_path: result.video_path,
-      // Render에서 접근 가능한 다운로드 URL (최신 1개 파일)
-      download_url: "/download"
+      download_url: `/download?token=${token}`
     });
   } catch (err) {
     return res.status(500).json({
       ok: false,
-      error: err?.message || String(err)
+      reason: "server_error",
+      error: String(err && err.message ? err.message : err)
     });
   }
 });
 
-// 최신 결과 mp4 다운로드
 app.get("/download", (req, res) => {
-  const filePath = "/tmp/final.mp4";
-  // 파일이 없으면 404
-  res.download(filePath, "finishflow.mp4", (err) => {
-    if (err) {
-      res.status(404).send("No file. Call POST /make first.");
+  try {
+    const token = String(req.query.token || "");
+    if (!token || !files.has(token)) {
+      return res.status(404).type("text/plain").send("Not found");
     }
-  });
+    const { filePath } = files.get(token);
+
+    if (!fs.existsSync(filePath)) {
+      files.delete(token);
+      return res.status(404).type("text/plain").send("Not found");
+    }
+
+    res.setHeader("Content-Type", "video/mp4");
+    res.setHeader("Content-Disposition", `attachment; filename="finishflow.mp4"`);
+
+    const stream = fs.createReadStream(filePath);
+    stream.pipe(res);
+
+    stream.on("close", () => {
+      // one-time download: remove file after served
+      try { fs.unlinkSync(filePath); } catch (_) {}
+      files.delete(token);
+    });
+  } catch (err) {
+    return res.status(500).type("text/plain").send("Download error");
+  }
 });
 
-// Render는 PORT 환경변수 사용
 const PORT = process.env.PORT || 3000;
-
 app.listen(PORT, () => {
   console.log(`FinishFlow listening on ${PORT}`);
 });
