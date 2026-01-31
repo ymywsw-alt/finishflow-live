@@ -1,67 +1,78 @@
-const express = require("express");
-const { makeVideoJob, getDownloadByToken } = require("./make");
+import express from "express";
+import { makeVideo, getDownloadPathByToken } from "./make.js";
+import fs from "fs";
+import path from "path";
 
 const app = express();
-app.use(express.json({ limit: "2mb" }));
+app.use(express.json({ limit: "1mb" }));
 
+const PORT = process.env.PORT || 10000;
+
+// health
+app.get("/health", (req, res) => {
+  res.json({ ok: true });
+});
+
+// root
 app.get("/", (req, res) => {
   res
     .status(200)
     .send("FinishFlow OK. Use /health, POST /make, GET /download?token=...");
 });
 
-app.get("/health", (req, res) => res.json({ ok: true }));
-
-/**
- * POST /make
- * body: { topic: "..." }
- */
+// make
 app.post("/make", async (req, res) => {
   try {
     const topic = (req.body?.topic || "").toString().trim();
-    if (!topic) return res.status(400).json({ ok: false, error: "missing topic" });
+    if (!topic) {
+      return res.status(400).json({ ok: false, error: "topic is required" });
+    }
 
-    const result = await makeVideoJob({ topic, req });
-    res.json(result);
+    const result = await makeVideo({ topic });
+
+    // download_url은 “절대경로”로 주는 게 테스트에 유리
+    const baseUrl = `${req.protocol}://${req.get("host")}`;
+    return res.status(200).json({
+      ...result,
+      download_url: `${baseUrl}${result.download_url}`
+    });
   } catch (err) {
-    console.error("[/make] ERROR:", err?.stack || err);
-    res.status(500).json({
+    console.error("[/make] error:", err);
+    return res.status(500).json({
       ok: false,
-      error: "internal_error",
-      detail: String(err?.message || err)
+      error: err?.message || "internal error"
     });
   }
 });
 
-/**
- * GET /download?token=...
- * Streams mp4
- */
-app.get("/download", async (req, res) => {
+// download
+app.get("/download", (req, res) => {
   try {
     const token = (req.query?.token || "").toString().trim();
-    if (!token) return res.status(400).send("missing token");
+    if (!token) return res.status(400).send("token is required");
 
-    const info = await getDownloadByToken(token);
-    if (!info) return res.status(404).send("invalid token");
+    const filePath = getDownloadPathByToken(token);
+    if (!filePath) return res.status(404).send("invalid or expired token");
+    if (!fs.existsSync(filePath)) return res.status(404).send("file missing");
 
-    // mp4 스트리밍
     res.setHeader("Content-Type", "video/mp4");
-    res.setHeader("Content-Disposition", `attachment; filename="finishflow.mp4"`);
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="finishflow-${token}.mp4"`
+    );
 
-    info.stream.pipe(res);
-    info.stream.on("error", (e) => {
+    const stream = fs.createReadStream(filePath);
+    stream.on("error", (e) => {
       console.error("[/download] stream error:", e);
-      if (!res.headersSent) res.status(500).end("stream error");
-      else res.end();
+      res.status(500).send("stream error");
     });
+    stream.pipe(res);
   } catch (err) {
-    console.error("[/download] ERROR:", err?.stack || err);
-    res.status(500).send("internal_error");
+    console.error("[/download] error:", err);
+    res.status(500).send("internal error");
   }
 });
 
-const port = process.env.PORT || 10000;
-app.listen(port, () => {
-  console.log(`FinishFlow listening on ${port}`);
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`FinishFlow listening on ${PORT}`);
 });
