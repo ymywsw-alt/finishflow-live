@@ -3,9 +3,8 @@ import fetch from "node-fetch";
 
 const app = express();
 app.use(express.json());
-app.use(express.static("public")); // UI 파일 serving
+app.use(express.static("public"));
 
-// ✅ 브라우저가 호출하는 유일한 API
 app.post("/make", async (req, res) => {
   try {
     const response = await fetch(
