@@ -10,4 +10,5 @@ COPY . .
 # ❌ EXPOSE 없음
 # ❌ server.js 실행 없음
 
-CMD ["node", "make.js"]
+CMD ["node", "server.js"]
+
