@@ -1,12 +1,4 @@
-# finishflow-live/Dockerfile (FULL REPLACE for worker web service)
-# - Must keep an HTTP server running (Render Web Service requirement)
-# - Install ffmpeg/ffprobe for video processing
-
-FROM node:18-bullseye
-
-RUN apt-get update && \
-    apt-get install -y ffmpeg && \
-    rm -rf /var/lib/apt/lists/*
+FROM node:22-slim
 
 WORKDIR /app
 
@@ -15,7 +7,7 @@ RUN npm install --omit=dev
 
 COPY . .
 
-# Render sets PORT, server.js must listen on process.env.PORT
-ENV NODE_ENV=production
+# ❌ EXPOSE 없음
+# ❌ server.js 실행 없음
 
-CMD ["node", "server.js"]
+CMD ["node", "make.js"]
