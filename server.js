@@ -18,9 +18,16 @@ app.get("/debug/env", (req, res) => {
 });
 
 /**
- * EXECUTE: OpenAI 호출 (live 단일 책임)
+ * (옵션) 간단 health
  */
-app.post("/api/execute", async (req, res) => {
+app.get("/health", (req, res) => {
+  res.json({ ok: true });
+});
+
+/**
+ * 공통 실행 핸들러
+ */
+async function handleExecute(req, res) {
   try {
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) {
@@ -81,9 +88,17 @@ app.post("/api/execute", async (req, res) => {
       message: String(e?.message || e),
     });
   }
-});
+}
+
+/**
+ * web-ui가 호출하는 경로 (기존 코드가 /execute를 씀)
+ */
+app.post("/execute", handleExecute);
+
+/**
+ * 우리가 표준으로 쓰는 경로
+ */
+app.post("/api/execute", handleExecute);
 
 const port = process.env.PORT || 10000;
-app.listen(port, () =>
-  console.log(`[finishflow-live] listening on ${port}`)
-);
+app.listen(port, () => console.log(`[finishflow-live] listening on ${port}`));
