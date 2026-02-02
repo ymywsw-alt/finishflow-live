@@ -1,57 +1,51 @@
-/**
- * finishflow-live/server.js (FULL REPLACE - ESM)
- * 역할: 엔진 API 게이트웨이
- * - GET  /health   : OK
- * - POST /execute  : worker로 프록시
- *
- * ENV (아무거나 하나만 있으면 됨)
- *   WORKER_URL = https://finishflow-worker.onrender.com
- *   FINISHFLOW_WORKER_URL = https://finishflow-worker.onrender.com
- */
-
 import express from "express";
+import fetch from "node-fetch";
 
 const app = express();
-const PORT = Number(process.env.PORT || 10000);
+app.use(express.json());
 
-const WORKER_URL_RAW =
-  process.env.WORKER_URL ||
-  process.env.FINISHFLOW_WORKER_URL ||
-  "https://finishflow-worker.onrender.com";
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
-const WORKER_URL = WORKER_URL_RAW.toString().trim().replace(/\/$/, "");
+if (!OPENAI_API_KEY) {
+  console.error("❌ OPENAI_API_KEY is missing");
+  process.exit(1);
+}
 
-// JSON 바디
-app.use(express.json({ limit: "10mb" }));
-
-app.get("/health", (req, res) => {
-  res.json({ ok: true, service: "finishflow-live", worker: WORKER_URL, time: new Date().toISOString() });
-});
-
-app.post("/execute", async (req, res) => {
+app.post("/generate", async (req, res) => {
   try {
-    const r = await fetch(`${WORKER_URL}/execute`, {
+    const { prompt } = req.body;
+
+    const r = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(req.body ?? {}),
+      headers: {
+        "Authorization": `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [{ role: "user", content: prompt }]
+      })
     });
 
-    const text = await r.text();
-    // worker가 JSON이든 텍스트든 그대로 전달
-    res.status(r.status).type("application/json").send(text);
+    const data = await r.json();
+
+    if (!r.ok) {
+      console.error("OpenAI error:", data);
+      return res.status(500).json(data);
+    }
+
+    res.json(data);
   } catch (e) {
-    res.status(502).json({
-      error: "Failed to reach worker /execute",
-      worker: WORKER_URL,
-      message: String(e?.message || e),
-    });
+    console.error(e);
+    res.status(500).json({ error: e.message });
   }
 });
 
-// 404
-app.use((req, res) => res.status(404).json({ error: "Not Found" }));
+app.get("/", (_, res) => {
+  res.send("finishflow-live OK");
+});
 
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`finishflow-live listening on ${PORT}`);
-  console.log(`WORKER_URL=${WORKER_URL}`);
+  console.log("🚀 server running on", PORT);
 });
