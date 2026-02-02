@@ -1,11 +1,10 @@
 {
-  "name": "finishflow-worker",
-  "private": true,
   "type": "module",
   "scripts": {
-    "start": "node make.js"
+    "start": "node server.js"
   },
   "dependencies": {
-    "node-fetch": "^3"
+    "express": "^4.19.2",
+    "node-fetch": "^3.3.2"
   }
 }
