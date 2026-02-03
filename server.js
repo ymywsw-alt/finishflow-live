@@ -70,7 +70,6 @@ app.get("/test/execute", (req, res) => {
 
 /**
  * ✅ 고정 결과 스키마: 롱폼1 + 숏폼3 + 썸네일3(추천1)
- * - 배열 길이(3)는 항상 고정
  */
 function emptyFixedResult() {
   return {
@@ -92,16 +91,15 @@ function errorPayload(errorCode, detail) {
   return {
     ok: false,
     errorCode,
-    error: errorCode, // 기존 호환
+    error: errorCode,
     detail: detail ? String(detail).slice(0, 2000) : null,
     result: emptyFixedResult(),
-    // ✅ A안: text는 운영용 1줄 요약만(또는 빈값)
     text: "작업 실패 – 잠시 후 다시 시도해주세요.",
   };
 }
 
 /**
- * OpenAI Responses API에서 output_text 뽑기 (안전)
+ * OpenAI Responses API에서 output_text 뽑기
  */
 function extractOutputText(data) {
   try {
@@ -116,7 +114,38 @@ function extractOutputText(data) {
 }
 
 /**
- * ✅ (B) 국가/언어 옵션 1개로 프롬프트 자동 조립
+ * ✅ 모델이 가끔 ```json ... ``` 로 감싸거나 앞뒤에 말 붙이는 경우가 있음
+ * 그래서 "JSON만" 남기도록 정리한 뒤 parse 한다.
+ */
+function coerceToJsonString(raw) {
+  if (!raw) return "";
+
+  let s = String(raw).trim();
+
+  // 1) ```json ... ``` 또는 ``` ... ``` 코드펜스 제거
+  // 시작이 ``` 로 시작하면 첫 줄 제거
+  if (s.startsWith("```")) {
+    // 첫 줄(```json or ```) 제거
+    const firstNewline = s.indexOf("\n");
+    if (firstNewline !== -1) s = s.slice(firstNewline + 1);
+    // 끝의 ``` 제거
+    const lastFence = s.lastIndexOf("```");
+    if (lastFence !== -1) s = s.slice(0, lastFence);
+    s = s.trim();
+  }
+
+  // 2) 그래도 앞뒤에 텍스트가 섞이면, 첫 '{' ~ 마지막 '}'만 추출
+  const firstBrace = s.indexOf("{");
+  const lastBrace = s.lastIndexOf("}");
+  if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+    s = s.slice(firstBrace, lastBrace + 1).trim();
+  }
+
+  return s;
+}
+
+/**
+ * 국가/언어 옵션 1개로 프롬프트 자동 조립
  */
 function buildPrompt({ topic, country }) {
   const presets = {
@@ -147,10 +176,12 @@ HARD RULES (must follow):
 - Tone: ${p.tone}
 - No exaggeration. No fear-mongering.
 - No investment advice. No buy/sell/hold recommendations.
-- Output MUST be in the exact JSON schema below. Do not add extra keys.
+- Output MUST be valid JSON and MUST match the exact schema.
+- Do NOT wrap the JSON in markdown fences (no \`\`\`).
+- Return ONLY the JSON object, nothing else.
 - Write in language: ${p.lang}
 
-TOPIC (one line):
+TOPIC:
 ${topic}
 
 OUTPUT JSON SCHEMA (EXACT):
@@ -171,23 +202,13 @@ OUTPUT JSON SCHEMA (EXACT):
   ]
 }
 
-Thumbnail writing style: ${p.thumbnailStyle}
-
-Longform requirements:
-- 8 to 12 minutes worth of script (spoken)
-- Must include: what happened, why it matters, impact on seniors, one neutral judgment point (no action command)
-
-Shorts requirements:
-- 3 scripts, each 30 to 50 seconds (spoken)
-- S1: one-line summary focus
-- S2: senior impact focus
-- S3: caution/watch point focus
+Thumbnail style: ${p.thumbnailStyle}
 
 Return ONLY the JSON.`;
 }
 
 /**
- * ✅ 모델이 준 JSON을 안전하게 파싱하고, 스키마를 강제로 고정
+ * 파싱 결과를 스키마로 강제 고정
  */
 function normalizeParsedResult(parsed) {
   const base = emptyFixedResult();
@@ -207,18 +228,12 @@ function normalizeParsedResult(parsed) {
   for (let i = 0; i < 3; i++) {
     const item = th[i] || {};
     base.thumbnails[i].text = typeof item.text === "string" ? item.text : "";
-    // recommended는 첫번째만 true로 강제
-    base.thumbnails[i].recommended = i === 0;
+    base.thumbnails[i].recommended = i === 0; // 추천 1개 고정
   }
 
   return base;
 }
 
-/**
- * 공통 실행 핸들러 (A안)
- * - ✅ result에 "진짜 결과물" 채움
- * - ✅ text는 운영용 1줄 요약만
- */
 async function handleExecute(req, res) {
   try {
     if (typeof fetch !== "function") {
@@ -273,19 +288,21 @@ async function handleExecute(req, res) {
     const data = await r.json();
     const outText = extractOutputText(data);
 
-    // ✅ A안 핵심: text(JSON 문자열) → 파싱 → result에 주입
+    // ✅ 코드펜스/잡텍스트 제거 후 JSON.parse
+    const jsonString = coerceToJsonString(outText);
     let parsed;
     try {
-      parsed = JSON.parse(outText);
+      parsed = JSON.parse(jsonString);
     } catch (e) {
-      return res.status(200).json(errorPayload("E-PARSE-001", `JSON.parse failed: ${String(e?.message || e)}`));
+      return res.status(200).json(
+        errorPayload("E-PARSE-001", `JSON.parse failed: ${String(e?.message || e)} | head=${jsonString.slice(0, 120)}`)
+      );
     }
 
     const result = normalizeParsedResult(parsed);
 
     return res.json({
       ok: true,
-      // ✅ 운영용 1줄 요약(고정)
       text: "완료 – 롱폼 1 + 숏폼 3 + 썸네일 3 생성",
       result,
       errorCode: null,
@@ -295,14 +312,7 @@ async function handleExecute(req, res) {
   }
 }
 
-/**
- * web-ui가 호출하는 경로
- */
 app.post("/execute", handleExecute);
-
-/**
- * 표준 경로
- */
 app.post("/api/execute", handleExecute);
 
 const port = process.env.PORT || 10000;
