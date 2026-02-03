@@ -1,4 +1,5 @@
 const express = require("express");
+const { createBgmWav } = require("./lib/audioflow_bgm");
 
 const app = express();
 app.use(express.json({ limit: "10mb" }));
