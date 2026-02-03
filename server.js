@@ -25,6 +25,52 @@ app.get("/health", (req, res) => {
 });
 
 /**
+ * ✅ 브라우저에서 클릭 한 번으로 POST /execute 테스트하는 페이지
+ * - 주소창으로 /execute 를 치면 GET이라 "Cannot GET /execute"가 정상
+ * - 이 페이지는 GET이므로 브라우저에서 열 수 있음
+ */
+app.get("/test/execute", (req, res) => {
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.end(`
+    <h3>FinishFlow Live - POST /execute Test</h3>
+    <p>이 페이지는 브라우저에서 테스트하기 위한 GET 페이지입니다. 실제 엔진은 POST /execute 입니다.</p>
+    <label>Country:
+      <select id="country">
+        <option value="KR" selected>KR</option>
+        <option value="JP">JP</option>
+        <option value="US">US</option>
+      </select>
+    </label>
+    <br/><br/>
+    <label>Prompt (topic):</label><br/>
+    <textarea id="prompt" rows="4" cols="70">오늘 환율 급등, 시니어 생활비 영향</textarea>
+    <br/><br/>
+    <button id="btn">Run POST /execute</button>
+    <pre id="out" style="white-space:pre-wrap; border:1px solid #ddd; padding:10px; margin-top:12px;"></pre>
+    <script>
+      const btn = document.getElementById('btn');
+      btn.onclick = async () => {
+        const out = document.getElementById('out');
+        out.textContent = "Running...";
+        try {
+          const prompt = document.getElementById('prompt').value;
+          const country = document.getElementById('country').value;
+          const r = await fetch('/execute', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ prompt, country })
+          });
+          const j = await r.json();
+          out.textContent = JSON.stringify(j, null, 2);
+        } catch (e) {
+          out.textContent = "ERROR: " + String(e);
+        }
+      };
+    </script>
+  `);
+});
+
+/**
  * OpenAI Responses API에서 output_text 뽑기 (안전)
  */
 function extractOutputText(data) {
@@ -117,7 +163,6 @@ function buildPrompt({ topic, country }) {
 
   const p = presets[(country || "KR").toUpperCase()] || presets.KR;
 
-  // 결과는 text로 반환될 것이므로, 구조를 매우 명확히 강제
   return `
 You are a senior-focused economic news briefing producer.
 
@@ -199,7 +244,7 @@ async function handleExecute(req, res) {
 
     const modeTag = mode || "default";
     const cTag = (country || "KR").toUpperCase();
-    const lTag = language || ""; // 참고용(미사용 가능)
+    const lTag = language || "";
 
     const r = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
@@ -228,14 +273,11 @@ async function handleExecute(req, res) {
     const data = await r.json();
     const outText = extractOutputText(data);
 
-    // ✅ 스키마 고정 result 제공(현재는 URL 생성 전 단계라 빈값 유지)
     const result = buildFixedResult();
 
     return res.json({
       ok: true,
-      // 기존 호환: text 유지 (여기에 JSON 문자열이 들어올 것)
       text: outText || "",
-      // (A) 고정 출력 포맷(틀)
       result,
       errorCode: null,
     });
