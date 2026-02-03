@@ -4,6 +4,46 @@ const app = express();
 app.use(express.json({ limit: "10mb" }));
 
 /**
+ * ✅ 간단 in-memory Rate Limit (의존성 없음)
+ * - 기본: IP당 60초에 10회
+ * - 환경변수로 조정 가능
+ */
+const RL_WINDOW_MS = Number(process.env.RL_WINDOW_MS || 60_000);
+const RL_MAX = Number(process.env.RL_MAX || 10);
+const rlStore = new Map(); // ip -> { count, resetAt }
+
+function rateLimit(req, res, next) {
+  // 로컬/프록시 환경 포함: Render는 보통 X-Forwarded-For 제공
+  const xff = req.headers["x-forwarded-for"];
+  const ip = (Array.isArray(xff) ? xff[0] : (xff || "")).split(",")[0].trim() || req.socket.remoteAddress || "unknown";
+
+  const now = Date.now();
+  const cur = rlStore.get(ip);
+
+  if (!cur || now > cur.resetAt) {
+    rlStore.set(ip, { count: 1, resetAt: now + RL_WINDOW_MS });
+    return next();
+  }
+
+  if (cur.count >= RL_MAX) {
+    const retrySec = Math.ceil((cur.resetAt - now) / 1000);
+    res.setHeader("Retry-After", String(retrySec));
+    return res.status(429).json({
+      ok: false,
+      errorCode: "E-RATE-LIMIT",
+      error: "E-RATE-LIMIT",
+      detail: `Too many requests. Retry after ${retrySec}s.`,
+      result: emptyFixedResult(),
+      text: "요청이 너무 많습니다. 잠시 후 다시 시도해주세요.",
+    });
+  }
+
+  cur.count += 1;
+  rlStore.set(ip, cur);
+  return next();
+}
+
+/**
  * DEBUG: 런타임 환경변수 확인
  */
 app.get("/debug/env", (req, res) => {
@@ -14,6 +54,7 @@ app.get("/debug/env", (req, res) => {
     keyPrefix: key ? key.slice(0, 7) : null,
     service: "finishflow-live",
     now: new Date().toISOString(),
+    rateLimit: { windowMs: RL_WINDOW_MS, maxPerWindow: RL_MAX },
   });
 });
 
@@ -99,7 +140,7 @@ function errorPayload(errorCode, detail) {
 }
 
 /**
- * OpenAI Responses API에서 output_text 뽑기
+ * Responses API에서 output_text 뽑기
  */
 function extractOutputText(data) {
   try {
@@ -114,27 +155,22 @@ function extractOutputText(data) {
 }
 
 /**
- * ✅ 모델이 가끔 ```json ... ``` 로 감싸거나 앞뒤에 말 붙이는 경우가 있음
- * 그래서 "JSON만" 남기도록 정리한 뒤 parse 한다.
+ * ✅ ```json ... ``` 코드펜스/잡텍스트 제거 후 JSON만 남김
  */
 function coerceToJsonString(raw) {
   if (!raw) return "";
-
   let s = String(raw).trim();
 
-  // 1) ```json ... ``` 또는 ``` ... ``` 코드펜스 제거
-  // 시작이 ``` 로 시작하면 첫 줄 제거
+  // 코드펜스 제거
   if (s.startsWith("```")) {
-    // 첫 줄(```json or ```) 제거
     const firstNewline = s.indexOf("\n");
     if (firstNewline !== -1) s = s.slice(firstNewline + 1);
-    // 끝의 ``` 제거
     const lastFence = s.lastIndexOf("```");
     if (lastFence !== -1) s = s.slice(0, lastFence);
     s = s.trim();
   }
 
-  // 2) 그래도 앞뒤에 텍스트가 섞이면, 첫 '{' ~ 마지막 '}'만 추출
+  // 첫 { ~ 마지막 }만 추출
   const firstBrace = s.indexOf("{");
   const lastBrace = s.lastIndexOf("}");
   if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
@@ -145,7 +181,7 @@ function coerceToJsonString(raw) {
 }
 
 /**
- * 국가/언어 옵션 1개로 프롬프트 자동 조립
+ * ✅ 국가/언어 프롬프트 자동 분기
  */
 function buildPrompt({ topic, country }) {
   const presets = {
@@ -234,12 +270,13 @@ function normalizeParsedResult(parsed) {
   return base;
 }
 
+/**
+ * ✅ 공통 실행 핸들러 (Rate Limit 적용)
+ */
 async function handleExecute(req, res) {
   try {
     if (typeof fetch !== "function") {
-      return res
-        .status(500)
-        .json(errorPayload("E-FETCH-NOT-FOUND", "Runtime fetch() not available. Use Node 18+."));
+      return res.status(500).json(errorPayload("E-FETCH-NOT-FOUND", "Runtime fetch() not available. Use Node 18+."));
     }
 
     const apiKey = process.env.OPENAI_API_KEY;
@@ -288,15 +325,15 @@ async function handleExecute(req, res) {
     const data = await r.json();
     const outText = extractOutputText(data);
 
-    // ✅ 코드펜스/잡텍스트 제거 후 JSON.parse
     const jsonString = coerceToJsonString(outText);
+
     let parsed;
     try {
       parsed = JSON.parse(jsonString);
     } catch (e) {
-      return res.status(200).json(
-        errorPayload("E-PARSE-001", `JSON.parse failed: ${String(e?.message || e)} | head=${jsonString.slice(0, 120)}`)
-      );
+      return res
+        .status(200)
+        .json(errorPayload("E-PARSE-001", `JSON.parse failed: ${String(e?.message || e)} | head=${jsonString.slice(0, 120)}`));
     }
 
     const result = normalizeParsedResult(parsed);
@@ -312,8 +349,11 @@ async function handleExecute(req, res) {
   }
 }
 
-app.post("/execute", handleExecute);
-app.post("/api/execute", handleExecute);
+/**
+ * ✅ Rate Limit을 실행 엔드포인트에만 적용
+ */
+app.post("/execute", rateLimit, handleExecute);
+app.post("/api/execute", rateLimit, handleExecute);
 
 const port = process.env.PORT || 10000;
 app.listen(port, () => console.log(`[finishflow-live] listening on ${port}`));
