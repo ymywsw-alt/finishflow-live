@@ -26,8 +26,6 @@ app.get("/health", (req, res) => {
 
 /**
  * ✅ 브라우저에서 클릭 한 번으로 POST /execute 테스트하는 페이지
- * - 주소창으로 /execute 를 치면 GET이라 "Cannot GET /execute"가 정상
- * - 이 페이지는 GET이므로 브라우저에서 열 수 있음
  */
 app.get("/test/execute", (req, res) => {
   res.setHeader("Content-Type", "text/html; charset=utf-8");
@@ -71,6 +69,38 @@ app.get("/test/execute", (req, res) => {
 });
 
 /**
+ * ✅ 고정 결과 스키마: 롱폼1 + 숏폼3 + 썸네일3(추천1)
+ * - 배열 길이(3)는 항상 고정
+ */
+function emptyFixedResult() {
+  return {
+    longform: { title: "", script: "" },
+    shortforms: [
+      { title: "", script: "" },
+      { title: "", script: "" },
+      { title: "", script: "" },
+    ],
+    thumbnails: [
+      { text: "", recommended: true },
+      { text: "", recommended: false },
+      { text: "", recommended: false },
+    ],
+  };
+}
+
+function errorPayload(errorCode, detail) {
+  return {
+    ok: false,
+    errorCode,
+    error: errorCode, // 기존 호환
+    detail: detail ? String(detail).slice(0, 2000) : null,
+    result: emptyFixedResult(),
+    // ✅ A안: text는 운영용 1줄 요약만(또는 빈값)
+    text: "작업 실패 – 잠시 후 다시 시도해주세요.",
+  };
+}
+
+/**
  * OpenAI Responses API에서 output_text 뽑기 (안전)
  */
 function extractOutputText(data) {
@@ -86,75 +116,21 @@ function extractOutputText(data) {
 }
 
 /**
- * ✅ 고정 결과 스키마: 롱폼1 + 숏폼3 + 썸네일3(추천1)
- * - URL이 없으면 "" 유지
- * - 배열 길이(3)는 항상 고정
- */
-function buildFixedResult({
-  longformUrl = "",
-  longformDurationSec = 0,
-  shortformUrls = [],
-  shortformDurationsSec = [],
-  thumbnailUrls = [],
-} = {}) {
-  const sUrls = Array.isArray(shortformUrls) ? shortformUrls : [];
-  const sDur = Array.isArray(shortformDurationsSec) ? shortformDurationsSec : [];
-  const tUrls = Array.isArray(thumbnailUrls) ? thumbnailUrls : [];
-
-  return {
-    longform: {
-      videoUrl: String(longformUrl || ""),
-      durationSec: Number(longformDurationSec || 0),
-    },
-    shortforms: [
-      { videoUrl: String(sUrls[0] || ""), durationSec: Number(sDur[0] || 0) },
-      { videoUrl: String(sUrls[1] || ""), durationSec: Number(sDur[1] || 0) },
-      { videoUrl: String(sUrls[2] || ""), durationSec: Number(sDur[2] || 0) },
-    ],
-    thumbnails: [
-      { imageUrl: String(tUrls[0] || ""), recommended: true },
-      { imageUrl: String(tUrls[1] || ""), recommended: false },
-      { imageUrl: String(tUrls[2] || ""), recommended: false },
-    ],
-  };
-}
-
-function errorPayload(errorCode, detail) {
-  return {
-    ok: false,
-    errorCode,
-    // 기존 호환(기존 UI가 error를 보던 경우 대비)
-    error: errorCode,
-    // 개발용 (길이 제한)
-    detail: detail ? String(detail).slice(0, 2000) : null,
-    // 스키마 고정: 실패해도 항상 존재
-    result: buildFixedResult(),
-    // 기존 호환: text 유지
-    text: "",
-  };
-}
-
-/**
  * ✅ (B) 국가/언어 옵션 1개로 프롬프트 자동 조립
- * - 학습/파인튜닝 아님: "프로그램 규칙" 고정
- * - 입력: topic(주제 1줄) + country(KR/JP/US)
  */
 function buildPrompt({ topic, country }) {
   const presets = {
     KR: {
-      label: "KR",
       lang: "ko",
       tone: "차분하고 사실 중심의 공영방송 뉴스 톤",
       thumbnailStyle: "짧고 단정, 과장 없음",
     },
     JP: {
-      label: "JP",
       lang: "ja",
       tone: "절제된 NHK 해설 톤",
       thumbnailStyle: "정보 중심, 과장 없음",
     },
     US: {
-      label: "US",
       lang: "en",
       tone: "PBS/NPR 스타일의 차분한 해설 톤",
       thumbnailStyle: "명확한 요지, 과장 없음",
@@ -211,12 +187,37 @@ Return ONLY the JSON.`;
 }
 
 /**
- * 공통 실행 핸들러
- *
- * 안정성 원칙:
- * 1) 기존 응답 { ok, text } 유지 (web-ui 깨짐 방지)
- * 2) 추가로 result를 항상 제공 (롱1+숏3+썸3 고정)
- * 3) 실패 시 errorCode 고정 제공 (UI 1줄 처리 가능)
+ * ✅ 모델이 준 JSON을 안전하게 파싱하고, 스키마를 강제로 고정
+ */
+function normalizeParsedResult(parsed) {
+  const base = emptyFixedResult();
+
+  const lf = parsed?.longform || {};
+  base.longform.title = typeof lf.title === "string" ? lf.title : "";
+  base.longform.script = typeof lf.script === "string" ? lf.script : "";
+
+  const sf = Array.isArray(parsed?.shortforms) ? parsed.shortforms : [];
+  for (let i = 0; i < 3; i++) {
+    const item = sf[i] || {};
+    base.shortforms[i].title = typeof item.title === "string" ? item.title : "";
+    base.shortforms[i].script = typeof item.script === "string" ? item.script : "";
+  }
+
+  const th = Array.isArray(parsed?.thumbnails) ? parsed.thumbnails : [];
+  for (let i = 0; i < 3; i++) {
+    const item = th[i] || {};
+    base.thumbnails[i].text = typeof item.text === "string" ? item.text : "";
+    // recommended는 첫번째만 true로 강제
+    base.thumbnails[i].recommended = i === 0;
+  }
+
+  return base;
+}
+
+/**
+ * 공통 실행 핸들러 (A안)
+ * - ✅ result에 "진짜 결과물" 채움
+ * - ✅ text는 운영용 1줄 요약만
  */
 async function handleExecute(req, res) {
   try {
@@ -236,7 +237,6 @@ async function handleExecute(req, res) {
       return res.status(400).json(errorPayload("E-INVALID-PROMPT", "INVALID_PROMPT"));
     }
 
-    // ✅ 최적안(B): 옵션 1개(country)만으로 내부 판단 기준 고정
     const composedPrompt = buildPrompt({
       topic: prompt,
       country: (country || "KR").toUpperCase(),
@@ -273,11 +273,20 @@ async function handleExecute(req, res) {
     const data = await r.json();
     const outText = extractOutputText(data);
 
-    const result = buildFixedResult();
+    // ✅ A안 핵심: text(JSON 문자열) → 파싱 → result에 주입
+    let parsed;
+    try {
+      parsed = JSON.parse(outText);
+    } catch (e) {
+      return res.status(200).json(errorPayload("E-PARSE-001", `JSON.parse failed: ${String(e?.message || e)}`));
+    }
+
+    const result = normalizeParsedResult(parsed);
 
     return res.json({
       ok: true,
-      text: outText || "",
+      // ✅ 운영용 1줄 요약(고정)
+      text: "완료 – 롱폼 1 + 숏폼 3 + 썸네일 3 생성",
       result,
       errorCode: null,
     });
@@ -287,12 +296,12 @@ async function handleExecute(req, res) {
 }
 
 /**
- * web-ui가 호출하는 경로 (기존 코드가 /execute를 씀)
+ * web-ui가 호출하는 경로
  */
 app.post("/execute", handleExecute);
 
 /**
- * 우리가 표준으로 쓰는 경로
+ * 표준 경로
  */
 app.post("/api/execute", handleExecute);
 
