@@ -1,360 +1,379 @@
+// server.js (CommonJS) — FinishFlow live engine (proxy)
+// - endpoints: POST /execute, POST /api/execute
+// - audioflow bgm: fail-open (returns bgm_download_url when available)
+// - fixed output schema + parse stabilizer
+// - simple rate limit
+// Node >= 18 (uses global fetch)
+
 const express = require("express");
+const crypto = require("crypto");
+
+// (이미 C-2-1에서 추가한 라인 유지 가능)
+// eslint-disable-next-line no-unused-vars
 const { createBgmWav } = require("./lib/audioflow_bgm");
 
 const app = express();
 app.use(express.json({ limit: "10mb" }));
 
-/**
- * ✅ 간단 in-memory Rate Limit (의존성 없음)
- * - 기본: IP당 60초에 10회
- * - 환경변수로 조정 가능
- */
-const RL_WINDOW_MS = Number(process.env.RL_WINDOW_MS || 60_000);
-const RL_MAX = Number(process.env.RL_MAX || 10);
-const rlStore = new Map(); // ip -> { count, resetAt }
+/* =========================
+ * ENV
+ * ========================= */
+const PORT = process.env.PORT || 10000;
+
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+
+const AUDIOFLOW_ENGINE_URL =
+  process.env.AUDIOFLOW_ENGINE_URL || "https://audioflow-live.onrender.com";
+const AUDIOFLOW_TIMEOUT_MS = Number(process.env.AUDIOFLOW_TIMEOUT_MS || 120000);
+
+// rate limit
+const RL_MAX_PER_MIN = Number(process.env.RL_MAX_PER_MIN || 10);
+
+/* =========================
+ * Helpers: rate limit
+ * ========================= */
+const rlMap = new Map(); // key: ip + minute, val: count
 
 function rateLimit(req, res, next) {
-  // 로컬/프록시 환경 포함: Render는 보통 X-Forwarded-For 제공
-  const xff = req.headers["x-forwarded-for"];
-  const ip = (Array.isArray(xff) ? xff[0] : (xff || "")).split(",")[0].trim() || req.socket.remoteAddress || "unknown";
+  try {
+    const ip =
+      (req.headers["x-forwarded-for"] || "").toString().split(",")[0].trim() ||
+      req.socket?.remoteAddress ||
+      "unknown";
+    const minute = Math.floor(Date.now() / 60000);
+    const key = `${ip}:${minute}`;
+    const cur = (rlMap.get(key) || 0) + 1;
+    rlMap.set(key, cur);
 
-  const now = Date.now();
-  const cur = rlStore.get(ip);
-
-  if (!cur || now > cur.resetAt) {
-    rlStore.set(ip, { count: 1, resetAt: now + RL_WINDOW_MS });
+    if (cur > RL_MAX_PER_MIN) {
+      return res.status(429).json(errorPayload("E-RATE-429", "Too many requests"));
+    }
+    return next();
+  } catch (e) {
+    // rate limit 실패해도 막지 않음
     return next();
   }
-
-  if (cur.count >= RL_MAX) {
-    const retrySec = Math.ceil((cur.resetAt - now) / 1000);
-    res.setHeader("Retry-After", String(retrySec));
-    return res.status(429).json({
-      ok: false,
-      errorCode: "E-RATE-LIMIT",
-      error: "E-RATE-LIMIT",
-      detail: `Too many requests. Retry after ${retrySec}s.`,
-      result: emptyFixedResult(),
-      text: "요청이 너무 많습니다. 잠시 후 다시 시도해주세요.",
-    });
-  }
-
-  cur.count += 1;
-  rlStore.set(ip, cur);
-  return next();
 }
 
-/**
- * DEBUG: 런타임 환경변수 확인
- */
-app.get("/debug/env", (req, res) => {
-  const key = process.env.OPENAI_API_KEY || "";
-  res.json({
-    ok: true,
-    hasOpenAIKey: Boolean(key),
-    keyPrefix: key ? key.slice(0, 7) : null,
-    service: "finishflow-live",
-    now: new Date().toISOString(),
-    rateLimit: { windowMs: RL_WINDOW_MS, maxPerWindow: RL_MAX },
-  });
-});
+/* =========================
+ * Helpers: fetch with timeout
+ * ========================= */
+async function fetchWithTimeout(url, options = {}, timeoutMs = 120000) {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(t);
+  }
+}
 
-/**
- * (옵션) 간단 health
- */
-app.get("/health", (req, res) => {
-  res.json({ ok: true });
-});
-
-/**
- * ✅ 브라우저에서 클릭 한 번으로 POST /execute 테스트하는 페이지
- */
-app.get("/test/execute", (req, res) => {
-  res.setHeader("Content-Type", "text/html; charset=utf-8");
-  res.end(`
-    <h3>FinishFlow Live - POST /execute Test</h3>
-    <p>이 페이지는 브라우저에서 테스트하기 위한 GET 페이지입니다. 실제 엔진은 POST /execute 입니다.</p>
-    <label>Country:
-      <select id="country">
-        <option value="KR" selected>KR</option>
-        <option value="JP">JP</option>
-        <option value="US">US</option>
-      </select>
-    </label>
-    <br/><br/>
-    <label>Prompt (topic):</label><br/>
-    <textarea id="prompt" rows="4" cols="70">오늘 환율 급등, 시니어 생활비 영향</textarea>
-    <br/><br/>
-    <button id="btn">Run POST /execute</button>
-    <pre id="out" style="white-space:pre-wrap; border:1px solid #ddd; padding:10px; margin-top:12px;"></pre>
-    <script>
-      const btn = document.getElementById('btn');
-      btn.onclick = async () => {
-        const out = document.getElementById('out');
-        out.textContent = "Running...";
-        try {
-          const prompt = document.getElementById('prompt').value;
-          const country = document.getElementById('country').value;
-          const r = await fetch('/execute', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ prompt, country })
-          });
-          const j = await r.json();
-          out.textContent = JSON.stringify(j, null, 2);
-        } catch (e) {
-          out.textContent = "ERROR: " + String(e);
-        }
-      };
-    </script>
-  `);
-});
-
-/**
- * ✅ 고정 결과 스키마: 롱폼1 + 숏폼3 + 썸네일3(추천1)
- */
-function emptyFixedResult() {
+/* =========================
+ * Helpers: schema & parse
+ * ========================= */
+function baseSchema() {
+  // FinishFlow 고정 스키마(예시)
+  // 실제 UI/worker가 기대하는 구조가 다르면 여기서만 맞추면 됨.
   return {
     longform: { title: "", script: "" },
-    shortforms: [
+    shorts: [
       { title: "", script: "" },
       { title: "", script: "" },
       { title: "", script: "" },
     ],
     thumbnails: [
-      { text: "", recommended: true },
-      { text: "", recommended: false },
-      { text: "", recommended: false },
+      { text: "" },
+      { text: "" },
+      { text: "" },
     ],
+    recommended_thumbnail_index: 0,
+    meta: {
+      model: OPENAI_MODEL,
+    },
+    bgm: {
+      preset: "",
+      duration_sec: 0,
+      download_url: "",
+    },
   };
 }
 
-function errorPayload(errorCode, detail) {
+function okPayload(data) {
+  return { ok: true, code: null, data };
+}
+
+function errorPayload(code, message) {
+  return { ok: false, code, message, data: baseSchema() };
+}
+
+// OpenAI 응답에서 텍스트 뽑기(Responses/ChatCompletions 모두 유사 대응)
+function extractOutputText(openaiJson) {
+  // Chat Completions
+  const c1 = openaiJson?.choices?.[0]?.message?.content;
+  if (typeof c1 === "string") return c1;
+
+  // Responses API 형태(대략 대응)
+  const out = openaiJson?.output?.[0]?.content?.[0]?.text;
+  if (typeof out === "string") return out;
+
+  // fallback
+  return JSON.stringify(openaiJson || {});
+}
+
+// 모델이 ```json ... ``` 같은 걸 줘도 {} 구간만 잘라내기
+function coerceToJsonString(text) {
+  if (!text) return "";
+  const s = text.toString();
+
+  // code fence 제거
+  const noFence = s.replace(/```json/gi, "```").replace(/```/g, "");
+
+  // 첫 { 와 마지막 } 사이 추출
+  const start = noFence.indexOf("{");
+  const end = noFence.lastIndexOf("}");
+  if (start >= 0 && end > start) return noFence.slice(start, end + 1);
+
+  return noFence.trim();
+}
+
+// 값 보정(없어도 스키마가 깨지지 않게)
+function normalizeResult(parsed, bgmInfo) {
+  const out = baseSchema();
+
+  // longform
+  if (parsed?.longform?.title) out.longform.title = String(parsed.longform.title);
+  if (parsed?.longform?.script) out.longform.script = String(parsed.longform.script);
+
+  // shorts
+  if (Array.isArray(parsed?.shorts)) {
+    for (let i = 0; i < 3; i++) {
+      const item = parsed.shorts[i] || {};
+      out.shorts[i].title = item.title ? String(item.title) : "";
+      out.shorts[i].script = item.script ? String(item.script) : "";
+    }
+  }
+
+  // thumbnails
+  if (Array.isArray(parsed?.thumbnails)) {
+    for (let i = 0; i < 3; i++) {
+      const item = parsed.thumbnails[i] || {};
+      out.thumbnails[i].text = item.text ? String(item.text) : "";
+    }
+  }
+
+  // recommended index
+  if (typeof parsed?.recommended_thumbnail_index === "number") {
+    const idx = Math.max(0, Math.min(2, parsed.recommended_thumbnail_index));
+    out.recommended_thumbnail_index = idx;
+  }
+
+  // bgm
+  if (bgmInfo) {
+    out.bgm.preset = bgmInfo.preset || "";
+    out.bgm.duration_sec = bgmInfo.duration_sec || 0;
+    out.bgm.download_url = bgmInfo.download_url || "";
+  }
+
+  return out;
+}
+
+/* =========================
+ * AudioFlow BGM (fail-open)
+ * ========================= */
+function mapBgmPreset(kind) {
+  if (kind === "shorts") return "UPBEAT_SHORTS";
+  if (kind === "documentary") return "DOCUMENTARY";
+  return "CALM_LOOP";
+}
+
+async function requestAudioFlowBgm({ topic, kind = "default", durationSec = 90 }) {
+  const preset = mapBgmPreset(kind);
+
+  const res = await fetchWithTimeout(
+    `${AUDIOFLOW_ENGINE_URL}/make`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        topic,
+        preset,
+        duration_sec: durationSec,
+      }),
+    },
+    AUDIOFLOW_TIMEOUT_MS
+  );
+
+  // rate limit이면 그냥 실패 처리(상위에서 fail-open)
+  if (res.status === 429) {
+    throw new Error("AUDIOFLOW_RATE_LIMIT");
+  }
+
+  const j = await res.json().catch(() => null);
+  if (!res.ok || !j || !j.ok) {
+    const code = j?.code || `HTTP_${res.status}`;
+    throw new Error(`AUDIOFLOW_FAIL_${code}`);
+  }
+
+  const dl = j?.data?.audio?.download_url || "";
   return {
-    ok: false,
-    errorCode,
-    error: errorCode,
-    detail: detail ? String(detail).slice(0, 2000) : null,
-    result: emptyFixedResult(),
-    text: "작업 실패 – 잠시 후 다시 시도해주세요.",
+    preset,
+    duration_sec: durationSec,
+    download_url: dl ? `${AUDIOFLOW_ENGINE_URL}${dl}` : "",
   };
 }
 
-/**
- * Responses API에서 output_text 뽑기
- */
-function extractOutputText(data) {
-  try {
-    const arr = data.output || [];
-    const msg = arr.find((x) => x.type === "message");
-    const content = msg?.content || [];
-    const txt = content.find((c) => c.type === "output_text");
-    return txt?.text || "";
-  } catch {
-    return "";
-  }
-}
-
-/**
- * ✅ ```json ... ``` 코드펜스/잡텍스트 제거 후 JSON만 남김
- */
-function coerceToJsonString(raw) {
-  if (!raw) return "";
-  let s = String(raw).trim();
-
-  // 코드펜스 제거
-  if (s.startsWith("```")) {
-    const firstNewline = s.indexOf("\n");
-    if (firstNewline !== -1) s = s.slice(firstNewline + 1);
-    const lastFence = s.lastIndexOf("```");
-    if (lastFence !== -1) s = s.slice(0, lastFence);
-    s = s.trim();
-  }
-
-  // 첫 { ~ 마지막 }만 추출
-  const firstBrace = s.indexOf("{");
-  const lastBrace = s.lastIndexOf("}");
-  if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
-    s = s.slice(firstBrace, lastBrace + 1).trim();
-  }
-
-  return s;
-}
-
-/**
- * ✅ 국가/언어 프롬프트 자동 분기
- */
-function buildPrompt({ topic, country }) {
-  const presets = {
-    KR: {
-      lang: "ko",
-      tone: "차분하고 사실 중심의 공영방송 뉴스 톤",
-      thumbnailStyle: "짧고 단정, 과장 없음",
-    },
-    JP: {
-      lang: "ja",
-      tone: "절제된 NHK 해설 톤",
-      thumbnailStyle: "정보 중심, 과장 없음",
-    },
-    US: {
-      lang: "en",
-      tone: "PBS/NPR 스타일의 차분한 해설 톤",
-      thumbnailStyle: "명확한 요지, 과장 없음",
-    },
-  };
-
-  const p = presets[(country || "KR").toUpperCase()] || presets.KR;
-
+/* =========================
+ * OpenAI call (Chat Completions)
+ * ========================= */
+function buildSystemPrompt() {
+  // 고정 스키마 강제: ONLY JSON
   return `
-You are a senior-focused economic news briefing producer.
-
-HARD RULES (must follow):
-- Audience: seniors
-- Tone: ${p.tone}
-- No exaggeration. No fear-mongering.
-- No investment advice. No buy/sell/hold recommendations.
-- Output MUST be valid JSON and MUST match the exact schema.
-- Do NOT wrap the JSON in markdown fences (no \`\`\`).
-- Return ONLY the JSON object, nothing else.
-- Write in language: ${p.lang}
-
-TOPIC:
-${topic}
-
-OUTPUT JSON SCHEMA (EXACT):
+You are FinishFlow Engine.
+Return ONLY valid JSON (no markdown, no code fences).
+Schema:
 {
-  "longform": {
-    "title": "string",
-    "script": "string"
-  },
-  "shortforms": [
-    { "title": "string", "script": "string" },
-    { "title": "string", "script": "string" },
-    { "title": "string", "script": "string" }
-  ],
-  "thumbnails": [
-    { "text": "string", "recommended": true },
-    { "text": "string", "recommended": false },
-    { "text": "string", "recommended": false }
-  ]
+  "longform": { "title": string, "script": string },
+  "shorts": [ { "title": string, "script": string }, {..}, {..} ],
+  "thumbnails": [ { "text": string }, { "text": string }, { "text": string } ],
+  "recommended_thumbnail_index": 0|1|2
+}
+Rules:
+- Keep outputs concise but complete.
+- Titles should be clickable; scripts should be ready to narrate.
+- Do NOT include any extra keys.
+`.trim();
 }
 
-Thumbnail style: ${p.thumbnailStyle}
-
-Return ONLY the JSON.`;
+function buildUserPrompt({ topic }) {
+  // topic만 받아도 항상 결과가 나오도록
+  const safeTopic = (topic || "").toString().trim() || "시니어 대상 설명형 콘텐츠";
+  return `Topic: ${safeTopic}\nGenerate the JSON following the schema exactly.`;
 }
 
-/**
- * 파싱 결과를 스키마로 강제 고정
- */
-function normalizeParsedResult(parsed) {
-  const base = emptyFixedResult();
-
-  const lf = parsed?.longform || {};
-  base.longform.title = typeof lf.title === "string" ? lf.title : "";
-  base.longform.script = typeof lf.script === "string" ? lf.script : "";
-
-  const sf = Array.isArray(parsed?.shortforms) ? parsed.shortforms : [];
-  for (let i = 0; i < 3; i++) {
-    const item = sf[i] || {};
-    base.shortforms[i].title = typeof item.title === "string" ? item.title : "";
-    base.shortforms[i].script = typeof item.script === "string" ? item.script : "";
+async function callOpenAI({ topic }) {
+  if (!OPENAI_API_KEY) {
+    throw new Error("NO_OPENAI_KEY");
   }
 
-  const th = Array.isArray(parsed?.thumbnails) ? parsed.thumbnails : [];
-  for (let i = 0; i < 3; i++) {
-    const item = th[i] || {};
-    base.thumbnails[i].text = typeof item.text === "string" ? item.text : "";
-    base.thumbnails[i].recommended = i === 0; // 추천 1개 고정
-  }
+  const payload = {
+    model: OPENAI_MODEL,
+    messages: [
+      { role: "system", content: buildSystemPrompt() },
+      { role: "user", content: buildUserPrompt({ topic }) },
+    ],
+    temperature: 0.7,
+  };
 
-  return base;
-}
-
-/**
- * ✅ 공통 실행 핸들러 (Rate Limit 적용)
- */
-async function handleExecute(req, res) {
-  try {
-    if (typeof fetch !== "function") {
-      return res.status(500).json(errorPayload("E-FETCH-NOT-FOUND", "Runtime fetch() not available. Use Node 18+."));
-    }
-
-    const apiKey = process.env.OPENAI_API_KEY;
-    if (!apiKey) {
-      return res.status(500).json(errorPayload("E-NO-OPENAI-KEY", "MISSING_OPENAI_API_KEY"));
-    }
-
-    const { prompt, mode, country, language } = req.body || {};
-    if (!prompt || typeof prompt !== "string") {
-      return res.status(400).json(errorPayload("E-INVALID-PROMPT", "INVALID_PROMPT"));
-    }
-
-    const composedPrompt = buildPrompt({
-      topic: prompt,
-      country: (country || "KR").toUpperCase(),
-    });
-
-    const modeTag = mode || "default";
-    const cTag = (country || "KR").toUpperCase();
-    const lTag = language || "";
-
-    const r = await fetch("https://api.openai.com/v1/responses", {
+  const r = await fetchWithTimeout(
+    "https://api.openai.com/v1/chat/completions",
+    {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
       },
-      body: JSON.stringify({
-        model: process.env.OPENAI_MODEL || "gpt-4.1-mini",
-        input: [
-          {
-            role: "user",
-            content: `MODE:${modeTag}\nCOUNTRY:${cTag}\nLANG:${lTag}\n\n${composedPrompt}`,
-          },
-        ],
-      }),
-    });
+      body: JSON.stringify(payload),
+    },
+    120000
+  );
 
-    if (!r.ok) {
-      const text = await r.text();
-      return res
-        .status(r.status)
-        .json(errorPayload("E-OPENAI-CALL-FAILED", `status=${r.status} body=${text.slice(0, 1200)}`));
-    }
-
-    const data = await r.json();
-    const outText = extractOutputText(data);
-
-    const jsonString = coerceToJsonString(outText);
-
-    let parsed;
-    try {
-      parsed = JSON.parse(jsonString);
-    } catch (e) {
-      return res
-        .status(200)
-        .json(errorPayload("E-PARSE-001", `JSON.parse failed: ${String(e?.message || e)} | head=${jsonString.slice(0, 120)}`));
-    }
-
-    const result = normalizeParsedResult(parsed);
-
-    return res.json({
-      ok: true,
-      text: "완료 – 롱폼 1 + 숏폼 3 + 썸네일 3 생성",
-      result,
-      errorCode: null,
-    });
-  } catch (e) {
-    return res.status(500).json(errorPayload("E-SERVER-ERROR", String(e?.message || e)));
+  if (!r.ok) {
+    const t = await r.text().catch(() => "");
+    throw new Error(`OPENAI_HTTP_${r.status}:${t.slice(0, 200)}`);
   }
+
+  return await r.json();
 }
 
-/**
- * ✅ Rate Limit을 실행 엔드포인트에만 적용
- */
-app.post("/execute", rateLimit, handleExecute);
-app.post("/api/execute", rateLimit, handleExecute);
+/* =========================
+ * Routes
+ * ========================= */
+app.get("/", (req, res) => {
+  res.setHeader("Content-Type", "text/plain; charset=utf-8");
+  res.send("finishflow-live engine is running");
+});
 
-const port = process.env.PORT || 10000;
-app.listen(port, () => console.log(`[finishflow-live] listening on ${port}`));
+app.get("/health", (req, res) => {
+  res.json({ ok: true });
+});
+
+app.get("/debug/env", (req, res) => {
+  res.json({
+    ok: true,
+    hasOpenAIKey: Boolean(OPENAI_API_KEY),
+    model: OPENAI_MODEL,
+    hasAudioFlowUrl: Boolean(AUDIOFLOW_ENGINE_URL),
+    rateLimitPerMin: RL_MAX_PER_MIN,
+  });
+});
+
+// execute handler
+async function handleExecute(req, res) {
+  const body = req.body || {};
+  const topic =
+    (body.topic ?? body.input ?? body.prompt ?? "").toString().trim() ||
+    "시니어 대상 설명형 콘텐츠";
+
+  // (선택) kind/duration을 UI/요청에서 받으면 반영 가능
+  const kind = (body.kind || "default").toString();
+  const durationSec = Number(body.durationSec || body.duration_sec || 90);
+
+  // 1) BGM 먼저(실패해도 계속)
+  let bgmInfo = null;
+  try {
+    bgmInfo = await requestAudioFlowBgm({ topic, kind, durationSec });
+  } catch (e) {
+    console.log("[BGM] skipped:", e?.message || e);
+  }
+
+  // 2) FinishFlow 결과 생성(OpenAI)
+  let openaiJson;
+  try {
+    openaiJson = await callOpenAI({ topic });
+  } catch (e) {
+    console.log("[OPENAI] failed:", e?.message || e);
+    return res.status(200).json(errorPayload("E-OPENAI-001", "OpenAI request failed"));
+  }
+
+  // 3) 파싱 안정화
+  const outText = extractOutputText(openaiJson);
+  const jsonString = coerceToJsonString(outText);
+
+  let parsed;
+  try {
+    parsed = JSON.parse(jsonString);
+  } catch (e) {
+    console.log("[PARSE] failed:", e?.message || e);
+    // 파싱 실패해도 빈 스키마 반환
+    const data = normalizeResult({}, bgmInfo);
+    return res.status(200).json({ ok: false, code: "E-PARSE-001", data });
+  }
+
+  const data = normalizeResult(parsed, bgmInfo);
+  return res.status(200).json(okPayload(data));
+}
+
+// 메인 엔드포인트
+app.post("/execute", rateLimit, async (req, res) => {
+  try {
+    await handleExecute(req, res);
+  } catch (e) {
+    console.log("[EXECUTE] fatal:", e?.message || e);
+    return res.status(200).json(errorPayload("E-FATAL-001", "Unexpected error"));
+  }
+});
+
+// 호환/프록시용 별칭
+app.post("/api/execute", rateLimit, async (req, res) => {
+  try {
+    await handleExecute(req, res);
+  } catch (e) {
+    console.log("[API_EXECUTE] fatal:", e?.message || e);
+    return res.status(200).json(errorPayload("E-FATAL-001", "Unexpected error"));
+  }
+});
+
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`finishflow-live listening on ${PORT}`);
+});
