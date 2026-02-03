@@ -25,7 +25,7 @@ app.get("/health", (req, res) => {
 });
 
 /**
- * OpenAI Responses API에서 output_text 뽑기 (기존 로직 유지 + 안전화)
+ * OpenAI Responses API에서 output_text 뽑기 (안전)
  */
 function extractOutputText(data) {
   try {
@@ -41,10 +41,16 @@ function extractOutputText(data) {
 
 /**
  * ✅ 고정 결과 스키마: 롱폼1 + 숏폼3 + 썸네일3(추천1)
- * - 안정성을 위해 URL이 없으면 ""로 유지
- * - 길이(3개)는 항상 고정
+ * - URL이 없으면 "" 유지
+ * - 배열 길이(3)는 항상 고정
  */
-function buildFixedResult({ longformUrl = "", longformDurationSec = 0, shortformUrls = [], shortformDurationsSec = [], thumbnailUrls = [] } = {}) {
+function buildFixedResult({
+  longformUrl = "",
+  longformDurationSec = 0,
+  shortformUrls = [],
+  shortformDurationsSec = [],
+  thumbnailUrls = [],
+} = {}) {
   const sUrls = Array.isArray(shortformUrls) ? shortformUrls : [];
   const sDur = Array.isArray(shortformDurationsSec) ? shortformDurationsSec : [];
   const tUrls = Array.isArray(thumbnailUrls) ? thumbnailUrls : [];
@@ -67,17 +73,13 @@ function buildFixedResult({ longformUrl = "", longformDurationSec = 0, shortform
   };
 }
 
-/**
- * ✅ 에러를 UI가 1줄로 처리하기 쉽게: errorCode만 고정 제공
- * - (중요) HTTP status는 기존대로 두되, web-ui가 보기 쉬운 필드 제공
- */
 function errorPayload(errorCode, detail) {
   return {
     ok: false,
     errorCode,
     // 기존 호환(기존 UI가 error를 보던 경우 대비)
     error: errorCode,
-    // 개발용(너무 길면 잘라서)
+    // 개발용 (길이 제한)
     detail: detail ? String(detail).slice(0, 2000) : null,
     // 스키마 고정: 실패해도 항상 존재
     result: buildFixedResult(),
@@ -87,18 +89,96 @@ function errorPayload(errorCode, detail) {
 }
 
 /**
+ * ✅ (B) 국가/언어 옵션 1개로 프롬프트 자동 조립
+ * - 학습/파인튜닝 아님: "프로그램 규칙" 고정
+ * - 입력: topic(주제 1줄) + country(KR/JP/US)
+ */
+function buildPrompt({ topic, country }) {
+  const presets = {
+    KR: {
+      label: "KR",
+      lang: "ko",
+      tone: "차분하고 사실 중심의 공영방송 뉴스 톤",
+      thumbnailStyle: "짧고 단정, 과장 없음",
+    },
+    JP: {
+      label: "JP",
+      lang: "ja",
+      tone: "절제된 NHK 해설 톤",
+      thumbnailStyle: "정보 중심, 과장 없음",
+    },
+    US: {
+      label: "US",
+      lang: "en",
+      tone: "PBS/NPR 스타일의 차분한 해설 톤",
+      thumbnailStyle: "명확한 요지, 과장 없음",
+    },
+  };
+
+  const p = presets[(country || "KR").toUpperCase()] || presets.KR;
+
+  // 결과는 text로 반환될 것이므로, 구조를 매우 명확히 강제
+  return `
+You are a senior-focused economic news briefing producer.
+
+HARD RULES (must follow):
+- Audience: seniors
+- Tone: ${p.tone}
+- No exaggeration. No fear-mongering.
+- No investment advice. No buy/sell/hold recommendations.
+- Output MUST be in the exact JSON schema below. Do not add extra keys.
+- Write in language: ${p.lang}
+
+TOPIC (one line):
+${topic}
+
+OUTPUT JSON SCHEMA (EXACT):
+{
+  "longform": {
+    "title": "string",
+    "script": "string"
+  },
+  "shortforms": [
+    { "title": "string", "script": "string" },
+    { "title": "string", "script": "string" },
+    { "title": "string", "script": "string" }
+  ],
+  "thumbnails": [
+    { "text": "string", "recommended": true },
+    { "text": "string", "recommended": false },
+    { "text": "string", "recommended": false }
+  ]
+}
+
+Thumbnail writing style: ${p.thumbnailStyle}
+
+Longform requirements:
+- 8 to 12 minutes worth of script (spoken)
+- Must include: what happened, why it matters, impact on seniors, one neutral judgment point (no action command)
+
+Shorts requirements:
+- 3 scripts, each 30 to 50 seconds (spoken)
+- S1: one-line summary focus
+- S2: senior impact focus
+- S3: caution/watch point focus
+
+Return ONLY the JSON.`;
+}
+
+/**
  * 공통 실행 핸들러
  *
  * 안정성 원칙:
- * 1) 기존 응답 { ok, text }는 유지 (web-ui 깨짐 방지)
+ * 1) 기존 응답 { ok, text } 유지 (web-ui 깨짐 방지)
  * 2) 추가로 result를 항상 제공 (롱1+숏3+썸3 고정)
  * 3) 실패 시 errorCode 고정 제공 (UI 1줄 처리 가능)
  */
 async function handleExecute(req, res) {
   try {
     if (typeof fetch !== "function") {
-      // Node 18+에서는 기본 fetch가 있어야 정상
-      return res.status(500).json(errorPayload("E-FETCH-NOT-FOUND", "Runtime fetch() not available. Use Node 18+."));
+      return res
+        .status(500)
+        .json(errorPayload("E-FETCH-NOT-FOUND", "Runtime fetch() not available. Use Node 18+."));
     }
 
     const apiKey = process.env.OPENAI_API_KEY;
@@ -111,11 +191,15 @@ async function handleExecute(req, res) {
       return res.status(400).json(errorPayload("E-INVALID-PROMPT", "INVALID_PROMPT"));
     }
 
-    // (B)는 다음 단계에서 프리셋 테이블로 확정 적용할 거라,
-    // 여기서는 입력만 안전하게 전달(현재 안정 최우선)
+    // ✅ 최적안(B): 옵션 1개(country)만으로 내부 판단 기준 고정
+    const composedPrompt = buildPrompt({
+      topic: prompt,
+      country: (country || "KR").toUpperCase(),
+    });
+
     const modeTag = mode || "default";
-    const cTag = country || "KR";
-    const lTag = language || "ko";
+    const cTag = (country || "KR").toUpperCase();
+    const lTag = language || ""; // 참고용(미사용 가능)
 
     const r = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
@@ -128,7 +212,7 @@ async function handleExecute(req, res) {
         input: [
           {
             role: "user",
-            content: `MODE:${modeTag}\nCOUNTRY:${cTag}\nLANG:${lTag}\n\n${prompt}`,
+            content: `MODE:${modeTag}\nCOUNTRY:${cTag}\nLANG:${lTag}\n\n${composedPrompt}`,
           },
         ],
       }),
@@ -144,18 +228,16 @@ async function handleExecute(req, res) {
     const data = await r.json();
     const outText = extractOutputText(data);
 
-    /**
-     * ✅ 스키마 고정 result 제공 (현재 단계에서는 URL 생성이 아직 없으므로 빈값)
-     * - 추후 /make가 실제로 생성한 URL들을 여기 result에 채우는 구조로 확장
-     */
+    // ✅ 스키마 고정 result 제공(현재는 URL 생성 전 단계라 빈값 유지)
     const result = buildFixedResult();
 
-    // ✅ 기존 web-ui 호환: ok + text 유지
     return res.json({
       ok: true,
+      // 기존 호환: text 유지 (여기에 JSON 문자열이 들어올 것)
       text: outText || "",
-      result,          // (A) 고정 출력 포맷
-      errorCode: null, // 성공 시 null
+      // (A) 고정 출력 포맷(틀)
+      result,
+      errorCode: null,
     });
   } catch (e) {
     return res.status(500).json(errorPayload("E-SERVER-ERROR", String(e?.message || e)));
