@@ -16,6 +16,9 @@ const express = require("express");
 // 사용은 '선택'이지만, 파일이 없으면 require에서 죽으니 반드시 존재해야 합니다.
 const { createBgmWav } = require("./lib/audioflow_bgm");
 
+// ✅ C-stage: preset auto selector (CommonJS)
+const { selectBGMPreset } = require("./lib/bgm_selector");
+
 const app = express();
 app.use(express.json({ limit: "10mb" }));
 
@@ -173,15 +176,40 @@ function normalizeResult(parsed, bgmInfo) {
 /* =========================
  * AudioFlow BGM (fail-open)
  * ========================= */
-function mapBgmPreset(kind) {
-  if (kind === "shorts") return "UPBEAT_SHORTS";
-  if (kind === "documentary") return "DOCUMENTARY";
-  return "CALM_LOOP";
+
+// ✅ C-stage: 자동 선택 규칙 적용 (kind + durationSec 기반)
+function mapBgmPreset(kind, durationSec = 90) {
+  const k = (kind || "default").toString().toLowerCase();
+
+  // shorts => SHORT + UPBEAT
+  if (k === "shorts") {
+    return selectBGMPreset({
+      videoType: "SHORT",
+      topicTone: "UPBEAT",
+      durationSec,
+    });
+  }
+
+  // documentary => LONG + DOCUMENTARY
+  if (k === "documentary") {
+    return selectBGMPreset({
+      videoType: "LONG",
+      topicTone: "DOCUMENTARY",
+      durationSec,
+    });
+  }
+
+  // default => LONG + CALM (시니어/건강 안정 톤)
+  return selectBGMPreset({
+    videoType: "LONG",
+    topicTone: "CALM",
+    durationSec,
+  });
 }
 
 // AudioFlow 엔진으로 /make 호출하여 wav 다운로드 url 받기
 async function requestAudioFlowBgm({ topic, kind = "default", durationSec = 90 }) {
-  const preset = mapBgmPreset(kind);
+  const preset = mapBgmPreset(kind, durationSec);
 
   const res = await fetchWithTimeout(
     `${AUDIOFLOW_ENGINE_URL}/make`,
@@ -233,7 +261,7 @@ async function createBgmFailOpen({ topic, kind, durationSec }) {
     // r.download_url 같은 값을 반환하도록 구현되어 있다면 아래 매핑 수정
     if (r && r.download_url) {
       return {
-        preset: mapBgmPreset(kind),
+        preset: mapBgmPreset(kind, durationSec),
         duration_sec: durationSec,
         download_url: r.download_url,
       };
