@@ -1,62 +1,73 @@
 /**
- * finishflow-live/server.js (CommonJS)
- * - GET /health
- * - GET /debug/env  (verify which code is running)
- * - POST /execute + /api/execute
+ * finishflow-live/server.js  (CommonJS)
+ * FULL REPLACE
+ *
+ * Provides:
+ * - GET  /            (plain text)
+ * - GET  /health      (with build stamp)
+ * - GET  /debug/env   (env + build stamp)
+ * - POST /execute     (FinishFlow JSON + (optional) AudioFlow BGM URL)
+ * - POST /api/execute (compat)
+ * - POST /make        (Generate MP4 via make.js -> makeVideo)
+ * - GET  /download    (Download MP4 by token via make.js token store)
  *
  * Node >= 18 (global fetch)
  */
 
 const express = require("express");
+const fs = require("fs");
 
 const app = express();
 app.use(express.json({ limit: "10mb" }));
 
 /* =========================
- * BUILD STAMP (FOR DIAGNOSIS)
+ * BUILD STAMP (for verification)
  * ========================= */
-const __BUILD_STAMP__ = "finishflow-live__serverjs__2026-02-04__r1";
-console.log("[BOOT] BUILD_STAMP =", __BUILD_STAMP__);
+const BUILD = "FFLIVE_2026-02-04_R3";
+console.log("[BOOT] BUILD =", BUILD);
 
 /* =========================
  * ENV
  * ========================= */
 const PORT = process.env.PORT || 10000;
+
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+
+// AudioFlow (for /execute BGM URL attach)
 const AUDIOFLOW_ENGINE_URL =
   process.env.AUDIOFLOW_ENGINE_URL || "https://audioflow-live.onrender.com";
 const AUDIOFLOW_TIMEOUT_MS = Number(process.env.AUDIOFLOW_TIMEOUT_MS || 120000);
 
-/* =========================
- * Routes (PUT DEBUG FIRST)
- * ========================= */
-app.get("/health", (req, res) => {
-  res.json({ ok: true, ts: Date.now() });
-});
+// rate limit (simple in-memory)
+const RL_MAX_PER_MIN = Number(process.env.RL_MAX_PER_MIN || 20);
+const rlMap = new Map(); // key ip:minute -> count
 
-// ✅ 이게 살아나야 “내가 수정한 server.js가 실행 중”이 확정됩니다.
-app.get("/debug/env", (req, res) => {
-  res.json({
-    ok: true,
-    build: __BUILD_STAMP__,
-    now: new Date().toISOString(),
-    hasOpenAIKey: !!process.env.OPENAI_API_KEY,
-    hasAudioFlowUrl: !!process.env.AUDIOFLOW_ENGINE_URL,
-    audioflowUrl: process.env.AUDIOFLOW_ENGINE_URL || null,
-    model: process.env.OPENAI_MODEL || OPENAI_MODEL,
-    port: PORT,
-    node: process.version
-  });
-});
+function rateLimit(req, res, next) {
+  try {
+    const ip =
+      (req.headers["x-forwarded-for"] || "").toString().split(",")[0].trim() ||
+      req.socket?.remoteAddress ||
+      "unknown";
+    const minute = Math.floor(Date.now() / 60000);
+    const key = `${ip}:${minute}`;
+    const cur = (rlMap.get(key) || 0) + 1;
+    rlMap.set(key, cur);
 
-// 루트
-app.get("/", (req, res) => {
-  res
-    .status(200)
-    .setHeader("Content-Type", "text/plain; charset=utf-8")
-    .send(`finishflow-live running\nBUILD=${__BUILD_STAMP__}\n`);
-});
+    // cleanup best-effort
+    for (const [k, v] of rlMap.entries()) {
+      const m = Number(k.split(":").pop());
+      if (Number.isFinite(m) && m < minute - 2) rlMap.delete(k);
+    }
+
+    if (cur > RL_MAX_PER_MIN) {
+      return res.status(429).json({ ok: false, code: "E-RATE-429" });
+    }
+    return next();
+  } catch {
+    return next();
+  }
+}
 
 /* =========================
  * Helpers
@@ -77,12 +88,12 @@ function baseSchema() {
     shorts: [
       { title: "", script: "" },
       { title: "", script: "" },
-      { title: "", script: "" }
+      { title: "", script: "" },
     ],
     thumbnails: [{ text: "" }, { text: "" }, { text: "" }],
     recommended_thumbnail_index: 0,
     meta: { model: OPENAI_MODEL },
-    bgm: { preset: "", duration_sec: 0, download_url: "" }
+    bgm: { preset: "", duration_sec: 0, download_url: "" },
   };
 }
 
@@ -108,11 +119,9 @@ function coerceToJsonString(text) {
   if (!text) return "";
   const s = text.toString();
   const noFence = s.replace(/```json/gi, "```").replace(/```/g, "");
-
   const start = noFence.indexOf("{");
   const end = noFence.lastIndexOf("}");
   if (start >= 0 && end > start) return noFence.slice(start, end + 1);
-
   return noFence.trim();
 }
 
@@ -152,7 +161,7 @@ function normalizeResult(parsed, bgmInfo) {
 }
 
 /* =========================
- * AudioFlow BGM (fail-open)
+ * AudioFlow BGM (fail-open attach for /execute)
  * ========================= */
 function mapBgmPreset(kind) {
   if (kind === "shorts") return "UPBEAT_SHORTS";
@@ -168,7 +177,7 @@ async function requestAudioFlowBgm({ topic, kind = "default", durationSec = 90 }
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ topic, preset, duration_sec: durationSec })
+      body: JSON.stringify({ topic, preset, duration_sec: durationSec }),
     },
     AUDIOFLOW_TIMEOUT_MS
   );
@@ -181,12 +190,11 @@ async function requestAudioFlowBgm({ topic, kind = "default", durationSec = 90 }
 
   const dlPath = j?.data?.audio?.download_url || "";
   const full = dlPath ? `${AUDIOFLOW_ENGINE_URL}${dlPath}` : "";
-
   return { preset, duration_sec: durationSec, download_url: full };
 }
 
 /* =========================
- * OpenAI call
+ * OpenAI call (Chat Completions)
  * ========================= */
 function buildSystemPrompt() {
   return `
@@ -216,9 +224,9 @@ async function callOpenAI({ topic }) {
     model: OPENAI_MODEL,
     messages: [
       { role: "system", content: buildSystemPrompt() },
-      { role: "user", content: buildUserPrompt({ topic }) }
+      { role: "user", content: buildUserPrompt({ topic }) },
     ],
-    temperature: 0.7
+    temperature: 0.7,
   };
 
   const r = await fetchWithTimeout(
@@ -227,9 +235,9 @@ async function callOpenAI({ topic }) {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${OPENAI_API_KEY}`
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
       },
-      body: JSON.stringify(payload)
+      body: JSON.stringify(payload),
     },
     120000
   );
@@ -238,12 +246,37 @@ async function callOpenAI({ topic }) {
     const t = await r.text().catch(() => "");
     throw new Error(`OPENAI_HTTP_${r.status}:${t.slice(0, 200)}`);
   }
-
   return await r.json();
 }
 
 /* =========================
- * Execute
+ * Routes: basics
+ * ========================= */
+app.get("/", (req, res) => {
+  res.setHeader("Content-Type", "text/plain; charset=utf-8");
+  res.send(`finishflow-live is running\nBUILD=${BUILD}\n`);
+});
+
+app.get("/health", (req, res) => {
+  res.json({ ok: true, ts: Date.now(), build: BUILD });
+});
+
+app.get("/debug/env", (req, res) => {
+  res.json({
+    ok: true,
+    build: BUILD,
+    now: new Date().toISOString(),
+    node: process.version,
+    hasOpenAIKey: !!process.env.OPENAI_API_KEY,
+    hasAudioFlowUrl: !!process.env.AUDIOFLOW_ENGINE_URL,
+    audioflowUrl: process.env.AUDIOFLOW_ENGINE_URL || null,
+    model: process.env.OPENAI_MODEL || OPENAI_MODEL,
+    rateLimitPerMin: RL_MAX_PER_MIN,
+  });
+});
+
+/* =========================
+ * /execute (JSON result + optional BGM URL)
  * ========================= */
 async function handleExecute(req, res) {
   const body = req.body || {};
@@ -254,7 +287,7 @@ async function handleExecute(req, res) {
   const kind = (body.kind || "default").toString();
   const durationSec = Number(body.durationSec || body.duration_sec || 90);
 
-  // 1) BGM (fail-open)
+  // 1) AudioFlow BGM attach (fail-open)
   let bgmInfo = null;
   try {
     bgmInfo = await requestAudioFlowBgm({ topic, kind, durationSec });
@@ -289,7 +322,7 @@ async function handleExecute(req, res) {
   return res.status(200).json(okPayload(data));
 }
 
-app.post("/execute", async (req, res) => {
+app.post("/execute", rateLimit, async (req, res) => {
   try {
     await handleExecute(req, res);
   } catch (e) {
@@ -298,7 +331,7 @@ app.post("/execute", async (req, res) => {
   }
 });
 
-app.post("/api/execute", async (req, res) => {
+app.post("/api/execute", rateLimit, async (req, res) => {
   try {
     await handleExecute(req, res);
   } catch (e) {
@@ -307,7 +340,62 @@ app.post("/api/execute", async (req, res) => {
   }
 });
 
+/* =========================
+ * /make + /download (MP4 generation pipeline)
+ * - make.js is ESM, so we dynamic-import it.
+ * ========================= */
+async function loadMakeModule() {
+  // ESM dynamic import from CommonJS
+  return await import("./make.js");
+}
+
+app.post("/make", rateLimit, async (req, res) => {
+  try {
+    const body = req.body || {};
+    const topic =
+      (body.topic ?? body.input ?? body.prompt ?? "").toString().trim() ||
+      "시니어 대상 설명형 콘텐츠";
+
+    const mod = await loadMakeModule();
+    if (!mod || typeof mod.makeVideo !== "function") {
+      return res.status(500).json({ ok: false, code: "E-MAKE-001" });
+    }
+
+    const result = await mod.makeVideo({ topic });
+    return res.status(200).json(result);
+  } catch (e) {
+    console.log("[MAKE] failed:", e?.message || e);
+    return res.status(200).json({ ok: false, code: "E-MAKE-500", message: String(e?.message || e) });
+  }
+});
+
+app.get("/download", async (req, res) => {
+  try {
+    const token = (req.query?.token || "").toString().trim();
+    if (!token) return res.status(400).send("missing token");
+
+    const mod = await loadMakeModule();
+    if (!mod || typeof mod.getDownloadPathByToken !== "function") {
+      return res.status(500).send("download module missing");
+    }
+
+    const filePath = mod.getDownloadPathByToken(token);
+    if (!filePath) return res.status(404).send("expired or invalid token");
+    if (!fs.existsSync(filePath)) return res.status(404).send("file not found");
+
+    res.setHeader("Content-Type", "video/mp4");
+    res.setHeader("Content-Disposition", `attachment; filename="finishflow-${token}.mp4"`);
+    fs.createReadStream(filePath).pipe(res);
+  } catch (e) {
+    console.log("[DOWNLOAD] failed:", e?.message || e);
+    return res.status(500).send("download error");
+  }
+});
+
+/* =========================
+ * Start
+ * ========================= */
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`[finishflow-live] listening on ${PORT}`);
-  console.log("[BOOT] BUILD_STAMP =", __BUILD_STAMP__);
+  console.log("[BOOT] BUILD =", BUILD);
 });
