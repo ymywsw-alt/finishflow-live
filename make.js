@@ -3,6 +3,18 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { spawn } from "child_process";
+import { createRequire } from "module";
+
+// ====== C-stage selector (CommonJS module from ./lib) ======
+const require = createRequire(import.meta.url);
+let selectBGMPreset = null;
+try {
+  // ./lib/bgm_selector.js is CommonJS now
+  ({ selectBGMPreset } = require("./lib/bgm_selector"));
+} catch {
+  // fail-open: selector missing -> fallback logic later
+  selectBGMPreset = null;
+}
 
 // ====== in-memory token store (TTL) ======
 const tokenStore = new Map(); // token -> { filePath, expiresAt }
@@ -190,15 +202,116 @@ async function getDurationSeconds(audioPath) {
   return Math.max(3, val);
 }
 
-// ffmpeg로 “오디오 길이만큼” 영상 만들기
-async function renderMp4({ title, audioPath, outPath, durationSec }) {
-  // 배경: black 1280x720, 30fps, durationSec
-  // 텍스트: 제목 중앙
-  // 오디오: AAC 192k
-  const draw = `drawtext=fontcolor=white:fontsize=52:text='${title
-    .replace(/'/g, "’")
-    .slice(0, 22)}':x=(w-text_w)/2:y=(h-text_h)/2`;
+// ====== AudioFlow BGM (fail-open) ======
+function getAudioflowEngineUrl() {
+  return (
+    process.env.AUDIOFLOW_ENGINE_URL ||
+    process.env.AUDIOFLOW_URL ||
+    "https://audioflow-live.onrender.com"
+  );
+}
 
+function pickPreset({ durationSec = 60 }) {
+  // selector가 있으면 사용, 없으면 최소 fallback
+  try {
+    if (typeof selectBGMPreset === "function") {
+      return selectBGMPreset({
+        videoType: durationSec <= 60 ? "SHORT" : "LONG",
+        topicTone: durationSec <= 60 ? "UPBEAT" : "CALM",
+        durationSec
+      });
+    }
+  } catch {}
+  return durationSec <= 60 ? "UPBEAT_SHORTS" : "CALM_LOOP";
+}
+
+async function requestAudioFlowBgm({ topic, durationSec }) {
+  const AUDIOFLOW_ENGINE_URL = getAudioflowEngineUrl();
+  const preset = pickPreset({ durationSec });
+
+  const timeoutMs = Number(process.env.AUDIOFLOW_TIMEOUT_MS || 120000);
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const r = await fetch(`${AUDIOFLOW_ENGINE_URL}/make`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: controller.signal,
+      body: JSON.stringify({
+        topic,
+        preset,
+        duration_sec: Math.round(durationSec)
+      })
+    });
+
+    const j = await r.json().catch(() => null);
+    if (!r.ok || !j || !j.ok) {
+      const code = j?.code || `HTTP_${r.status}`;
+      throw new Error(`AUDIOFLOW_FAIL_${code}`);
+    }
+
+    const dlPath = j?.data?.audio?.download_url || "";
+    const full = dlPath ? `${AUDIOFLOW_ENGINE_URL}${dlPath}` : "";
+    if (!full) throw new Error("AUDIOFLOW_NO_DOWNLOAD_URL");
+
+    return { preset, download_url: full };
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+async function downloadToFile(url, outPath) {
+  const r = await fetch(url);
+  if (!r.ok) {
+    const t = await r.text().catch(() => "");
+    throw new Error(`Download failed ${r.status}: ${t.slice(0, 200)}`);
+  }
+  const ab = await r.arrayBuffer();
+  fs.writeFileSync(outPath, Buffer.from(ab));
+  return outPath;
+}
+
+// ffmpeg로 “오디오 길이만큼” 영상 만들기 (+ 선택: BGM 믹스)
+async function renderMp4({ title, voiceAudioPath, bgmPath, outPath, durationSec }) {
+  const safeTitle = (title || "")
+    .toString()
+    .replace(/'/g, "’")
+    .slice(0, 22);
+
+  const draw = `drawtext=fontcolor=white:fontsize=52:text='${safeTitle}':x=(w-text_w)/2:y=(h-text_h)/2`;
+
+  // 기본(음성만)
+  if (!bgmPath) {
+    const args = [
+      "-y",
+      "-f",
+      "lavfi",
+      "-i",
+      `color=c=black:s=1280x720:r=30:d=${durationSec}`,
+      "-i",
+      voiceAudioPath,
+      "-vf",
+      draw,
+      "-c:v",
+      "libx264",
+      "-pix_fmt",
+      "yuv420p",
+      "-c:a",
+      "aac",
+      "-b:a",
+      "192k",
+      "-shortest",
+      outPath
+    ];
+
+    await run("ffmpeg", args, { timeoutMs: 240000 });
+    return;
+  }
+
+  // BGM 포함(음성 + BGM 믹싱)
+  // - bgm은 loop, durationSec만큼 잘라서
+  // - 음성 1.0 / bgm 0.35로 안정 믹스
   const args = [
     "-y",
     "-f",
@@ -206,9 +319,25 @@ async function renderMp4({ title, audioPath, outPath, durationSec }) {
     "-i",
     `color=c=black:s=1280x720:r=30:d=${durationSec}`,
     "-i",
-    audioPath,
+    voiceAudioPath,
+    "-stream_loop",
+    "-1",
+    "-i",
+    bgmPath,
     "-vf",
     draw,
+    "-filter_complex",
+    [
+      "[1:a]aformat=fltp:44100:stereo,volume=1.0[a1]",
+      "[2:a]aformat=fltp:44100:stereo,volume=0.35[a2]",
+      "[a1][a2]amix=inputs=2:duration=first:dropout_transition=0[aout]"
+    ].join(";"),
+    "-map",
+    "0:v:0",
+    "-map",
+    "[aout]",
+    "-t",
+    `${durationSec}`,
     "-c:v",
     "libx264",
     "-pix_fmt",
@@ -221,7 +350,7 @@ async function renderMp4({ title, audioPath, outPath, durationSec }) {
     outPath
   ];
 
-  await run("ffmpeg", args, { timeoutMs: 240000 });
+  await run("ffmpeg", args, { timeoutMs: 300000 });
 }
 
 // mp4 유효성 체크 (스트림 존재 + 길이>2초)
@@ -267,7 +396,8 @@ export async function makeVideo({ topic }) {
   const id = crypto.randomBytes(6).toString("hex");
   const tmpDir = os.tmpdir();
 
-  const audioPath = path.join(tmpDir, `finishflow-${id}.mp3`);
+  const voicePath = path.join(tmpDir, `finishflow-${id}.mp3`);
+  const bgmLocalPath = path.join(tmpDir, `finishflow-${id}-bgm.wav`);
   const mp4Path = path.join(tmpDir, `finishflow-${id}.mp4`);
 
   // 1) script
@@ -275,23 +405,41 @@ export async function makeVideo({ topic }) {
 
   // 2) tts
   const { mp3, cleaned } = await generateTTSMp3(script);
-  fs.writeFileSync(audioPath, mp3);
+  fs.writeFileSync(voicePath, mp3);
 
   // 3) duration
-  const durationSec = await getDurationSeconds(audioPath);
+  const durationSec = await getDurationSeconds(voicePath);
 
-  // 4) render mp4 (duration = audio duration)
+  // 4) (NEW) try AudioFlow BGM (fail-open)
+  let bgmInfo = null;
+  let bgmPath = null;
+  try {
+    bgmInfo = await requestAudioFlowBgm({ topic, durationSec });
+    if (bgmInfo?.download_url) {
+      await downloadToFile(bgmInfo.download_url, bgmLocalPath);
+      // 다운로드 성공하면 믹싱에 사용
+      bgmPath = bgmLocalPath;
+    }
+  } catch (e) {
+    // fail-open: bgm 없이도 영상 생성은 계속
+    console.log("[BGM] skipped:", e?.message || e);
+    bgmInfo = null;
+    bgmPath = null;
+  }
+
+  // 5) render mp4 (duration = voice duration)  + (optional) bgm mix
   await renderMp4({
     title: topic,
-    audioPath,
+    voiceAudioPath: voicePath,
+    bgmPath, // 있으면 믹싱
     outPath: mp4Path,
     durationSec
   });
 
-  // 5) validate playable mp4
+  // 6) validate playable mp4
   await validateMp4(mp4Path);
 
-  // 6) token for download
+  // 7) token for download
   const token = crypto.randomBytes(12).toString("hex");
   putToken(token, mp4Path);
 
@@ -305,7 +453,11 @@ export async function makeVideo({ topic }) {
     download_url: `/download?token=${token}`,
     meta: {
       duration_sec: Math.round(durationSec),
-      tts_input_preview: cleaned.slice(0, 120)
+      tts_input_preview: cleaned.slice(0, 120),
+      // NEW: bgm meta (useful for debugging)
+      bgm_used: !!bgmPath,
+      bgm_preset: bgmInfo?.preset || "",
+      bgm_download_url: bgmInfo?.download_url || ""
     }
   };
 }
