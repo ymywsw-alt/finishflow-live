@@ -1,47 +1,60 @@
 /**
- * finishflow-live/server.js  (CommonJS)
- * FULL REPLACE
+ * finishflow-live/server.js (CommonJS)  ✅ FULL REPLACE
  *
- * Provides:
- * - GET  /            (plain text)
- * - GET  /health      (with build stamp)
- * - GET  /debug/env   (env + build stamp)
- * - POST /execute     (FinishFlow JSON + (optional) AudioFlow BGM URL)
- * - POST /api/execute (compat)
- * - POST /make        (Generate MP4 via make.js -> makeVideo)
- * - GET  /download    (Download MP4 by token via make.js token store)
+ * Goals (고정):
+ * - GET /              : "finishflow-live is running" + BUILD
+ * - GET /health        : ok
+ * - GET /debug/env     : ok + key flags (Cannot GET 방지)
+ * - POST /execute      : main API (JSON schema)
+ * - POST /api/execute  : compat
+ * - POST /make         : alias (기존 습관/테스트용) ✅ 반드시 "/make" 슬래시 포함
  *
- * Node >= 18 (global fetch)
+ * Node >= 18 (Render Node22 OK) : global fetch 사용
  */
 
 const express = require("express");
-const fs = require("fs");
 
-const app = express();
-app.use(express.json({ limit: "10mb" }));
+// ✅ already exists in your repo: ./lib/audioflow_bgm.js (CommonJS)
+const { createBgmWav } = require("./lib/audioflow_bgm");
+
+// ✅ you created/converted: ./lib/bgm_selector.js (CommonJS)
+// - if it doesn't exist or fails, we fallback safely (fail-open)
+let selectBGMPreset = null;
+try {
+  // expect: module.exports = { selectBGMPreset } OR module.exports = function ...
+  const mod = require("./lib/bgm_selector");
+  selectBGMPreset = mod?.selectBGMPreset || mod;
+} catch (e) {
+  console.log("[BOOT] bgm_selector not loaded (ok):", e?.message || e);
+}
 
 /* =========================
- * BUILD STAMP (for verification)
+ * App
  * ========================= */
-const BUILD = "FFLIVE_2026-02-04_R3";
-console.log("[BOOT] BUILD =", BUILD);
+const app = express();
+app.use(express.json({ limit: "10mb" }));
 
 /* =========================
  * ENV
  * ========================= */
 const PORT = process.env.PORT || 10000;
+const BUILD = process.env.BUILD || process.env.RENDER_GIT_COMMIT || "DEV";
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 
-// AudioFlow (for /execute BGM URL attach)
+// AudioFlow Live URL (you already use this name)
 const AUDIOFLOW_ENGINE_URL =
   process.env.AUDIOFLOW_ENGINE_URL || "https://audioflow-live.onrender.com";
 const AUDIOFLOW_TIMEOUT_MS = Number(process.env.AUDIOFLOW_TIMEOUT_MS || 120000);
 
-// rate limit (simple in-memory)
+// simple rate limit
 const RL_MAX_PER_MIN = Number(process.env.RL_MAX_PER_MIN || 20);
-const rlMap = new Map(); // key ip:minute -> count
+
+/* =========================
+ * Helpers: rate limit
+ * ========================= */
+const rlMap = new Map(); // ip:minute -> count
 
 function rateLimit(req, res, next) {
   try {
@@ -49,28 +62,29 @@ function rateLimit(req, res, next) {
       (req.headers["x-forwarded-for"] || "").toString().split(",")[0].trim() ||
       req.socket?.remoteAddress ||
       "unknown";
+
     const minute = Math.floor(Date.now() / 60000);
     const key = `${ip}:${minute}`;
+
     const cur = (rlMap.get(key) || 0) + 1;
     rlMap.set(key, cur);
 
-    // cleanup best-effort
+    // cleanup (best-effort)
     for (const [k, v] of rlMap.entries()) {
-      const m = Number(k.split(":").pop());
-      if (Number.isFinite(m) && m < minute - 2) rlMap.delete(k);
+      if (!k.endsWith(`:${minute}`) && v <= 0) rlMap.delete(k);
     }
 
     if (cur > RL_MAX_PER_MIN) {
-      return res.status(429).json({ ok: false, code: "E-RATE-429" });
+      return res.status(429).json(errorPayload("E-RATE-429", "Too many requests"));
     }
     return next();
-  } catch {
+  } catch (e) {
     return next();
   }
 }
 
 /* =========================
- * Helpers
+ * Helpers: fetch with timeout
  * ========================= */
 async function fetchWithTimeout(url, options = {}, timeoutMs = 120000) {
   const controller = new AbortController();
@@ -82,6 +96,9 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 120000) {
   }
 }
 
+/* =========================
+ * Helpers: schema
+ * ========================= */
 function baseSchema() {
   return {
     longform: { title: "", script: "" },
@@ -92,7 +109,7 @@ function baseSchema() {
     ],
     thumbnails: [{ text: "" }, { text: "" }, { text: "" }],
     recommended_thumbnail_index: 0,
-    meta: { model: OPENAI_MODEL },
+    meta: { model: OPENAI_MODEL, build: BUILD },
     bgm: { preset: "", duration_sec: 0, download_url: "" },
   };
 }
@@ -105,10 +122,15 @@ function errorPayload(code, message) {
   return { ok: false, code, message, data: baseSchema() };
 }
 
+/* =========================
+ * Helpers: OpenAI output parse (E-PARSE-001)
+ * ========================= */
 function extractOutputText(openaiJson) {
+  // Chat Completions
   const c1 = openaiJson?.choices?.[0]?.message?.content;
   if (typeof c1 === "string") return c1;
 
+  // (fallback) Responses 형태
   const out = openaiJson?.output?.[0]?.content?.[0]?.text;
   if (typeof out === "string") return out;
 
@@ -118,19 +140,26 @@ function extractOutputText(openaiJson) {
 function coerceToJsonString(text) {
   if (!text) return "";
   const s = text.toString();
+
+  // remove ``` fences
   const noFence = s.replace(/```json/gi, "```").replace(/```/g, "");
+
+  // extract first { ... last }
   const start = noFence.indexOf("{");
   const end = noFence.lastIndexOf("}");
   if (start >= 0 && end > start) return noFence.slice(start, end + 1);
+
   return noFence.trim();
 }
 
 function normalizeResult(parsed, bgmInfo) {
   const out = baseSchema();
 
+  // longform
   if (parsed?.longform?.title) out.longform.title = String(parsed.longform.title);
   if (parsed?.longform?.script) out.longform.script = String(parsed.longform.script);
 
+  // shorts
   if (Array.isArray(parsed?.shorts)) {
     for (let i = 0; i < 3; i++) {
       const item = parsed.shorts[i] || {};
@@ -139,6 +168,7 @@ function normalizeResult(parsed, bgmInfo) {
     }
   }
 
+  // thumbnails
   if (Array.isArray(parsed?.thumbnails)) {
     for (let i = 0; i < 3; i++) {
       const item = parsed.thumbnails[i] || {};
@@ -146,11 +176,13 @@ function normalizeResult(parsed, bgmInfo) {
     }
   }
 
+  // recommended idx
   if (typeof parsed?.recommended_thumbnail_index === "number") {
     const idx = Math.max(0, Math.min(2, parsed.recommended_thumbnail_index));
     out.recommended_thumbnail_index = idx;
   }
 
+  // bgm
   if (bgmInfo) {
     out.bgm.preset = bgmInfo.preset || "";
     out.bgm.duration_sec = bgmInfo.duration_sec || 0;
@@ -161,26 +193,48 @@ function normalizeResult(parsed, bgmInfo) {
 }
 
 /* =========================
- * AudioFlow BGM (fail-open attach for /execute)
+ * BGM preset selection (auto, no user choice)
  * ========================= */
-function mapBgmPreset(kind) {
-  if (kind === "shorts") return "UPBEAT_SHORTS";
-  if (kind === "documentary") return "DOCUMENTARY";
+function pickPreset({ videoType, topicTone, durationSec }) {
+  // use your lib if available
+  try {
+    if (typeof selectBGMPreset === "function") {
+      return selectBGMPreset({ videoType, topicTone, durationSec });
+    }
+  } catch (e) {
+    console.log("[BGM] selector failed, fallback:", e?.message || e);
+  }
+
+  // fallback rule
+  const dur = Number(durationSec || 0);
+  const vt = (videoType || "").toString().toUpperCase();
+  const tone = (topicTone || "").toString().toUpperCase();
+
+  if (vt === "SHORT" || (Number.isFinite(dur) && dur > 0 && dur <= 60)) return "UPBEAT_SHORTS";
+  if (tone === "INFO" || tone === "DOCUMENTARY") return "DOCUMENTARY";
   return "CALM_LOOP";
 }
 
-async function requestAudioFlowBgm({ topic, kind = "default", durationSec = 90 }) {
-  const preset = mapBgmPreset(kind);
-
+/* =========================
+ * AudioFlow BGM (fail-open)
+ * ========================= */
+async function requestAudioFlowBgm({ topic, preset, durationSec }) {
   const res = await fetchWithTimeout(
     `${AUDIOFLOW_ENGINE_URL}/make`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ topic, preset, duration_sec: durationSec }),
+      body: JSON.stringify({
+        topic,
+        preset,
+        duration_sec: durationSec,
+      }),
     },
     AUDIOFLOW_TIMEOUT_MS
   );
+
+  // rate-limit propagate as error (will still fail-open)
+  if (res.status === 429) throw new Error("AUDIOFLOW_RATE_LIMIT");
 
   const j = await res.json().catch(() => null);
   if (!res.ok || !j || !j.ok) {
@@ -188,9 +242,46 @@ async function requestAudioFlowBgm({ topic, kind = "default", durationSec = 90 }
     throw new Error(`AUDIOFLOW_FAIL_${code}`);
   }
 
-  const dlPath = j?.data?.audio?.download_url || "";
-  const full = dlPath ? `${AUDIOFLOW_ENGINE_URL}${dlPath}` : "";
-  return { preset, duration_sec: durationSec, download_url: full };
+  // assume: { ok:true, data:{ audio:{ download_url:"/download/xxx.wav" } } }
+  const dlPath = j?.data?.audio?.download_url || j?.data?.download_url || "";
+  const full = dlPath
+    ? dlPath.startsWith("http")
+      ? dlPath
+      : `${AUDIOFLOW_ENGINE_URL}${dlPath}`
+    : "";
+
+  return {
+    preset,
+    duration_sec: durationSec,
+    download_url: full,
+  };
+}
+
+async function createBgmFailOpen({ topic, videoType, topicTone, durationSec }) {
+  const preset = pickPreset({ videoType, topicTone, durationSec });
+
+  // 1) AudioFlow first
+  try {
+    return await requestAudioFlowBgm({ topic, preset, durationSec });
+  } catch (e) {
+    console.log("[BGM] audioflow skipped:", e?.message || e);
+  }
+
+  // 2) local generator (if exists)
+  try {
+    const r = await createBgmWav({ topic, preset, durationSec });
+    if (r && r.download_url) {
+      return {
+        preset,
+        duration_sec: durationSec,
+        download_url: r.download_url,
+      };
+    }
+  } catch (e) {
+    console.log("[BGM] local skipped:", e?.message || e);
+  }
+
+  return null;
 }
 
 /* =========================
@@ -202,13 +293,20 @@ Return ONLY valid JSON (no markdown, no code fences).
 Schema:
 {
   "longform": { "title": string, "script": string },
-  "shorts": [ { "title": string, "script": string }, {..}, {..} ],
-  "thumbnails": [ { "text": string }, { "text": string }, { "text": string } ],
+  "shorts": [
+    { "title": string, "script": string },
+    { "title": string, "script": string },
+    { "title": string, "script": string }
+  ],
+  "thumbnails": [
+    { "text": string }, { "text": string }, { "text": string }
+  ],
   "recommended_thumbnail_index": 0|1|2
 }
 Rules:
 - Do NOT include any extra keys.
 - Output must be parseable JSON.
+- Write Korean for Korean topics.
 `.trim();
 }
 
@@ -226,7 +324,7 @@ async function callOpenAI({ topic }) {
       { role: "system", content: buildSystemPrompt() },
       { role: "user", content: buildUserPrompt({ topic }) },
     ],
-    temperature: 0.7,
+    temperature: 0.6,
   };
 
   const r = await fetchWithTimeout(
@@ -246,21 +344,23 @@ async function callOpenAI({ topic }) {
     const t = await r.text().catch(() => "");
     throw new Error(`OPENAI_HTTP_${r.status}:${t.slice(0, 200)}`);
   }
+
   return await r.json();
 }
 
 /* =========================
- * Routes: basics
+ * Routes
  * ========================= */
 app.get("/", (req, res) => {
   res.setHeader("Content-Type", "text/plain; charset=utf-8");
-  res.send(`finishflow-live is running\nBUILD=${BUILD}\n`);
+  res.send(`finishflow-live is running\nBUILD=${BUILD}`);
 });
 
 app.get("/health", (req, res) => {
   res.json({ ok: true, ts: Date.now(), build: BUILD });
 });
 
+// ✅ debug/env (Cannot GET 방지)
 app.get("/debug/env", (req, res) => {
   res.json({
     ok: true,
@@ -275,27 +375,34 @@ app.get("/debug/env", (req, res) => {
   });
 });
 
-/* =========================
- * /execute (JSON result + optional BGM URL)
- * ========================= */
+/**
+ * 핵심 실행 로직
+ * body 지원 키:
+ * - topic | input | prompt
+ * - videoType: "LONG"|"SHORT"
+ * - topicTone: "INFO"|"DOCUMENTARY"|"CALM"|"HEALTH" 등
+ * - durationSec | duration_sec
+ */
 async function handleExecute(req, res) {
   const body = req.body || {};
+
   const topic =
     (body.topic ?? body.input ?? body.prompt ?? "").toString().trim() ||
     "시니어 대상 설명형 콘텐츠";
 
-  const kind = (body.kind || "default").toString();
+  const videoType = (body.videoType || body.video_type || "LONG").toString();
+  const topicTone = (body.topicTone || body.topic_tone || "CALM").toString();
   const durationSec = Number(body.durationSec || body.duration_sec || 90);
 
-  // 1) AudioFlow BGM attach (fail-open)
+  // 1) BGM (fail-open)
   let bgmInfo = null;
   try {
-    bgmInfo = await requestAudioFlowBgm({ topic, kind, durationSec });
+    bgmInfo = await createBgmFailOpen({ topic, videoType, topicTone, durationSec });
   } catch (e) {
-    console.log("[BGM] skipped:", e?.message || e);
+    console.log("[BGM] fatal skipped:", e?.message || e);
   }
 
-  // 2) OpenAI
+  // 2) OpenAI JSON generate
   let openaiJson;
   try {
     openaiJson = await callOpenAI({ topic });
@@ -305,7 +412,7 @@ async function handleExecute(req, res) {
     return res.status(200).json({ ok: false, code: "E-OPENAI-001", data });
   }
 
-  // 3) Parse
+  // 3) parse 안정화
   const outText = extractOutputText(openaiJson);
   const jsonString = coerceToJsonString(outText);
 
@@ -322,6 +429,9 @@ async function handleExecute(req, res) {
   return res.status(200).json(okPayload(data));
 }
 
+/**
+ * ✅ Main endpoint
+ */
 app.post("/execute", rateLimit, async (req, res) => {
   try {
     await handleExecute(req, res);
@@ -331,6 +441,9 @@ app.post("/execute", rateLimit, async (req, res) => {
   }
 });
 
+/**
+ * ✅ compat
+ */
 app.post("/api/execute", rateLimit, async (req, res) => {
   try {
     await handleExecute(req, res);
@@ -340,62 +453,24 @@ app.post("/api/execute", rateLimit, async (req, res) => {
   }
 });
 
-/* =========================
- * /make + /download (MP4 generation pipeline)
- * - make.js is ESM, so we dynamic-import it.
- * ========================= */
-async function loadMakeModule() {
-  // ESM dynamic import from CommonJS
-  return await import("./make.js");
-}
-
+/**
+ * ✅ /make 를 “살린다”
+ * - 사람들이 습관적으로 /make 때릴 수 있으니 alias로 고정
+ * - 반드시 "/make" (슬래시 포함)
+ */
 app.post("/make", rateLimit, async (req, res) => {
   try {
-    const body = req.body || {};
-    const topic =
-      (body.topic ?? body.input ?? body.prompt ?? "").toString().trim() ||
-      "시니어 대상 설명형 콘텐츠";
-
-    const mod = await loadMakeModule();
-    if (!mod || typeof mod.makeVideo !== "function") {
-      return res.status(500).json({ ok: false, code: "E-MAKE-001" });
-    }
-
-    const result = await mod.makeVideo({ topic });
-    return res.status(200).json(result);
+    await handleExecute(req, res);
   } catch (e) {
-    console.log("[MAKE] failed:", e?.message || e);
-    return res.status(200).json({ ok: false, code: "E-MAKE-500", message: String(e?.message || e) });
-  }
-});
-
-app.get("/download", async (req, res) => {
-  try {
-    const token = (req.query?.token || "").toString().trim();
-    if (!token) return res.status(400).send("missing token");
-
-    const mod = await loadMakeModule();
-    if (!mod || typeof mod.getDownloadPathByToken !== "function") {
-      return res.status(500).send("download module missing");
-    }
-
-    const filePath = mod.getDownloadPathByToken(token);
-    if (!filePath) return res.status(404).send("expired or invalid token");
-    if (!fs.existsSync(filePath)) return res.status(404).send("file not found");
-
-    res.setHeader("Content-Type", "video/mp4");
-    res.setHeader("Content-Disposition", `attachment; filename="finishflow-${token}.mp4"`);
-    fs.createReadStream(filePath).pipe(res);
-  } catch (e) {
-    console.log("[DOWNLOAD] failed:", e?.message || e);
-    return res.status(500).send("download error");
+    console.log("[MAKE] fatal:", e?.message || e);
+    return res.status(200).json(errorPayload("E-FATAL-001", "Unexpected error"));
   }
 });
 
 /* =========================
- * Start
+ * Listen
  * ========================= */
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`[finishflow-live] listening on ${PORT}`);
-  console.log("[BOOT] BUILD =", BUILD);
+  console.log(`[BOOT] BUILD=${BUILD}`);
 });
