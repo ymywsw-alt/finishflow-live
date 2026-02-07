@@ -1,104 +1,99 @@
-/**
- * finishflow-live/server.js (CommonJS)  ✅ FULL REPLACE
- *
- * Goals (고정):
- * - GET /              : "finishflow-live is running" + BUILD
- * - GET /health        : ok
- * - GET /debug/env     : ok + key flags (Cannot GET 방지)
- * - POST /execute      : main API (JSON schema)
- * - POST /api/execute  : compat
- * - POST /make         : alias (기존 습관/테스트용) ✅ 반드시 "/make" 슬래시 포함
- *
- * Node >= 18 (Render Node22 OK) : global fetch 사용
- */
+// finishflow-live/server.js  (CommonJS)  ✅ FULL REPLACE
+// Node >= 18 (global fetch). Windows/Render 모두 동일.
+// Endpoints:
+//  - GET  /            : "finishflow-live is running" + BUILD
+//  - GET  /health      : ok
+//  - GET  /debug/env   : ok + key flags
+//  - POST /execute     : main API
+//  - POST /api/execute : compat
+//  - POST /make        : alias (반드시 /make 유지)
 
-const express = require("express");
+require("dotenv").config();
 
-// ✅ already exists in your repo: ./lib/audioflow_bgm.js (CommonJS)
-const { createBgmWav } = require("./lib/audioflow_bgm");
+const http = require("http");
+const url = require("url");
 
-// ✅ you created/converted: ./lib/bgm_selector.js (CommonJS)
-// - if it doesn't exist or fails, we fallback safely (fail-open)
-let selectBGMPreset = null;
-try {
-  // expect: module.exports = { selectBGMPreset } OR module.exports = function ...
-  const mod = require("./lib/bgm_selector");
-  selectBGMPreset = mod?.selectBGMPreset || mod;
-} catch (e) {
-  console.log("[BOOT] bgm_selector not loaded (ok):", e?.message || e);
+const BUILD = process.env.BUILD || "DEV";
+const PORT = Number(process.env.PORT || 10000);
+const MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+const RATELIMIT_PER_MIN = Number(process.env.RATELIMIT_PER_MIN || 20);
+
+console.log("[ENV] loaded:", !!process.env.OPENAI_API_KEY, "len:", (process.env.OPENAI_API_KEY || "").length);
+console.log("[finishflow-live] listening on", PORT);
+console.log("[BOOT] BUILD=" + BUILD);
+
+// (BGM optional) keep your existing “skip” logs style
+if (!process.env.AUDIOFLOW_URL) {
+  console.log("[BGM] audioflow skipped: AUDIOFLOW_FAIL_HTTP_404");
+  console.log("[BGM] local skipped: AUDIOFLOW_FAIL_HTTP_404");
 }
 
-/* =========================
- * App
- * ========================= */
-const app = express();
-app.use(express.json({ limit: "10mb" }));
+// -------------------- tiny utilities --------------------
+function sendJson(res, status, obj) {
+  const body = JSON.stringify(obj);
+  res.writeHead(status, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, x-trace-id",
+  });
+  res.end(body);
+}
 
-/* =========================
- * ENV
- * ========================= */
-const PORT = process.env.PORT || 10000;
-const BUILD = process.env.BUILD || process.env.RENDER_GIT_COMMIT || "DEV";
+function sendText(res, status, text) {
+  res.writeHead(status, {
+    "Content-Type": "text/plain; charset=utf-8",
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, x-trace-id",
+  });
+  res.end(text);
+}
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+function readJsonBody(req) {
+  return new Promise((resolve, reject) => {
+    let data = "";
+    req.on("data", (chunk) => (data += chunk));
+    req.on("end", () => {
+      if (!data) return resolve({});
+      try {
+        resolve(JSON.parse(data));
+      } catch (e) {
+        reject(new Error("INVALID_JSON_BODY"));
+      }
+    });
+  });
+}
 
-// AudioFlow Live URL (you already use this name)
-const AUDIOFLOW_ENGINE_URL =
-  process.env.AUDIOFLOW_ENGINE_URL || "https://audioflow-live.onrender.com";
-const AUDIOFLOW_TIMEOUT_MS = Number(process.env.AUDIOFLOW_TIMEOUT_MS || 120000);
-
-// simple rate limit
-const RL_MAX_PER_MIN = Number(process.env.RL_MAX_PER_MIN || 20);
-
-/* =========================
- * Helpers: rate limit
- * ========================= */
-const rlMap = new Map(); // ip:minute -> count
-
-function rateLimit(req, res, next) {
-  try {
-    const ip =
-      (req.headers["x-forwarded-for"] || "").toString().split(",")[0].trim() ||
-      req.socket?.remoteAddress ||
-      "unknown";
-
-    const minute = Math.floor(Date.now() / 60000);
-    const key = `${ip}:${minute}`;
-
-    const cur = (rlMap.get(key) || 0) + 1;
-    rlMap.set(key, cur);
-
-    // cleanup (best-effort)
-    for (const [k, v] of rlMap.entries()) {
-      if (!k.endsWith(`:${minute}`) && v <= 0) rlMap.delete(k);
-    }
-
-    if (cur > RL_MAX_PER_MIN) {
-      return res.status(429).json(errorPayload("E-RATE-429", "Too many requests"));
-    }
-    return next();
-  } catch (e) {
-    return next();
+// -------------------- simple in-memory rate limit --------------------
+const rl = {
+  windowStart: Date.now(),
+  count: 0,
+};
+function rateLimitCheck() {
+  const now = Date.now();
+  if (now - rl.windowStart > 60_000) {
+    rl.windowStart = now;
+    rl.count = 0;
   }
+  rl.count += 1;
+  if (rl.count > RATELIMIT_PER_MIN) return false;
+  return true;
 }
 
-/* =========================
- * Helpers: fetch with timeout
- * ========================= */
+// -------------------- fetch with timeout --------------------
 async function fetchWithTimeout(url, options = {}, timeoutMs = 120000) {
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetch(url, { ...options, signal: controller.signal });
+    const res = await fetch(url, { ...options, signal: controller.signal });
+    return res;
   } finally {
     clearTimeout(t);
   }
 }
 
-/* =========================
- * Helpers: schema
- * ========================= */
+// -------------------- schema helpers --------------------
 function baseSchema() {
   return {
     longform: { title: "", script: "" },
@@ -109,368 +104,284 @@ function baseSchema() {
     ],
     thumbnails: [{ text: "" }, { text: "" }, { text: "" }],
     recommended_thumbnail_index: 0,
-    meta: { model: OPENAI_MODEL, build: BUILD },
     bgm: { preset: "", duration_sec: 0, download_url: "" },
+    meta: { model: MODEL, build: BUILD },
   };
 }
 
-function okPayload(data) {
-  return { ok: true, code: null, data };
-}
-
-function errorPayload(code, message) {
-  return { ok: false, code, message, data: baseSchema() };
-}
-
-/* =========================
- * Helpers: OpenAI output parse (E-PARSE-001)
- * ========================= */
-function extractOutputText(openaiJson) {
-  // Chat Completions
-  const c1 = openaiJson?.choices?.[0]?.message?.content;
-  if (typeof c1 === "string") return c1;
-
-  // (fallback) Responses 형태
-  const out = openaiJson?.output?.[0]?.content?.[0]?.text;
-  if (typeof out === "string") return out;
-
-  return JSON.stringify(openaiJson || {});
-}
-
 function coerceToJsonString(text) {
-  if (!text) return "";
-  const s = text.toString();
+  const s = (text || "").toString();
 
   // remove ``` fences
   const noFence = s.replace(/```json/gi, "```").replace(/```/g, "");
 
-  // extract first { ... last }
+  // extract first {...} block
   const start = noFence.indexOf("{");
   const end = noFence.lastIndexOf("}");
-  if (start >= 0 && end > start) return noFence.slice(start, end + 1);
+  if (start >= 0 && end > start) return noFence.slice(start, end + 1).trim();
 
   return noFence.trim();
 }
 
-function normalizeResult(parsed, bgmInfo) {
-  const out = baseSchema();
+// ✅ FIXED: handle ChatCompletions message.content as string OR array parts
+function extractOutputText(openaiJson) {
+  // 1) Chat Completions: choices[0].message.content
+  const content = openaiJson?.choices?.[0]?.message?.content;
 
-  // longform
-  if (parsed?.longform?.title) out.longform.title = String(parsed.longform.title);
-  if (parsed?.longform?.script) out.longform.script = String(parsed.longform.script);
+  // content: string
+  if (typeof content === "string" && content.trim()) return content;
 
-  // shorts
-  if (Array.isArray(parsed?.shorts)) {
-    for (let i = 0; i < 3; i++) {
-      const item = parsed.shorts[i] || {};
-      out.shorts[i].title = item.title ? String(item.title) : "";
-      out.shorts[i].script = item.script ? String(item.script) : "";
+  // content: array of parts (e.g. [{type:"text", text:"..."}])
+  if (Array.isArray(content)) {
+    const joined = content
+      .map((p) => {
+        if (!p) return "";
+        if (typeof p === "string") return p;
+        if (typeof p?.text === "string") return p.text;
+        if (typeof p?.content === "string") return p.content;
+        if (typeof p?.value === "string") return p.value;
+        return "";
+      })
+      .join("\n")
+      .trim();
+    if (joined) return joined;
+  }
+
+  // 2) Responses API: output_text
+  const ot = openaiJson?.output_text;
+  if (typeof ot === "string" && ot.trim()) return ot;
+
+  // 3) Responses API: output array
+  const output = openaiJson?.output;
+  if (Array.isArray(output)) {
+    const texts = [];
+    for (const item of output) {
+      if (!item) continue;
+
+      if (typeof item?.text === "string") texts.push(item.text);
+
+      if (Array.isArray(item?.content)) {
+        for (const p of item.content) {
+          if (!p) continue;
+          if (typeof p?.text === "string") texts.push(p.text);
+          if (typeof p?.content === "string") texts.push(p.content);
+        }
+      }
     }
+    const joined = texts.join("\n").trim();
+    if (joined) return joined;
   }
 
-  // thumbnails
-  if (Array.isArray(parsed?.thumbnails)) {
-    for (let i = 0; i < 3; i++) {
-      const item = parsed.thumbnails[i] || {};
-      out.thumbnails[i].text = item.text ? String(item.text) : "";
-    }
-  }
+  // 4) Fallback: openaiJson.text (some wrappers)
+  const t = openaiJson?.text;
+  if (typeof t === "string" && t.trim()) return t;
 
-  // recommended idx
-  if (typeof parsed?.recommended_thumbnail_index === "number") {
-    const idx = Math.max(0, Math.min(2, parsed.recommended_thumbnail_index));
-    out.recommended_thumbnail_index = idx;
-  }
-
-  // bgm
-  if (bgmInfo) {
-    out.bgm.preset = bgmInfo.preset || "";
-    out.bgm.duration_sec = bgmInfo.duration_sec || 0;
-    out.bgm.download_url = bgmInfo.download_url || "";
-  }
-
-  return out;
+  return "";
 }
 
-/* =========================
- * BGM preset selection (auto, no user choice)
- * ========================= */
-function pickPreset({ videoType, topicTone, durationSec }) {
-  // use your lib if available
-  try {
-    if (typeof selectBGMPreset === "function") {
-      return selectBGMPreset({ videoType, topicTone, durationSec });
-    }
-  } catch (e) {
-    console.log("[BGM] selector failed, fallback:", e?.message || e);
-  }
+// -------------------- OpenAI call --------------------
+async function callOpenAI(traceId, payload) {
+  if (!process.env.OPENAI_API_KEY) throw new Error("OPENAI_KEY_MISSING");
 
-  // fallback rule
-  const dur = Number(durationSec || 0);
-  const vt = (videoType || "").toString().toUpperCase();
-  const tone = (topicTone || "").toString().toUpperCase();
+  const url = "https://api.openai.com/v1/chat/completions";
 
-  if (vt === "SHORT" || (Number.isFinite(dur) && dur > 0 && dur <= 60)) return "UPBEAT_SHORTS";
-  if (tone === "INFO" || tone === "DOCUMENTARY") return "DOCUMENTARY";
-  return "CALM_LOOP";
-}
+  // ✅ 강제: JSON만 반환하도록 지시 (FinishFlow 용)
+  const system = [
+    "You are FinishFlow.",
+    "Return ONLY valid JSON. No markdown. No commentary.",
+    "The JSON must match exactly this schema:",
+    JSON.stringify(
+      {
+        longform: { title: "string", script: "string" },
+        shorts: [{ title: "string", script: "string" }, { title: "string", script: "string" }, { title: "string", script: "string" }],
+        thumbnails: [{ text: "string" }, { text: "string" }, { text: "string" }],
+        recommended_thumbnail_index: 0,
+        bgm: { preset: "string", duration_sec: 0, download_url: "string" },
+      },
+      null,
+      2
+    ),
+  ].join("\n");
 
-/* =========================
- * AudioFlow BGM (fail-open)
- * ========================= */
-async function requestAudioFlowBgm({ topic, preset, durationSec }) {
-  const res = await fetchWithTimeout(
-    `${AUDIOFLOW_ENGINE_URL}/make`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        topic,
-        preset,
-        duration_sec: durationSec,
-      }),
-    },
-    AUDIOFLOW_TIMEOUT_MS
-  );
+  const user = [
+    "Input JSON:",
+    JSON.stringify(payload, null, 2),
+    "",
+    "Rules:",
+    "- longform.script must be long enough to match durationSec (approx).",
+    "- shorts: 3 variants, each 30~50 sec script.",
+    "- thumbnails: 3 high-CTR Korean texts for seniors. Avoid sensational false fear.",
+    "- recommended_thumbnail_index: 0~2.",
+    "- Keep it calm, decisive, practical.",
+  ].join("\n");
 
-  // rate-limit propagate as error (will still fail-open)
-  if (res.status === 429) throw new Error("AUDIOFLOW_RATE_LIMIT");
-
-  const j = await res.json().catch(() => null);
-  if (!res.ok || !j || !j.ok) {
-    const code = j?.code || `HTTP_${res.status}`;
-    throw new Error(`AUDIOFLOW_FAIL_${code}`);
-  }
-
-  // assume: { ok:true, data:{ audio:{ download_url:"/download/xxx.wav" } } }
-  const dlPath = j?.data?.audio?.download_url || j?.data?.download_url || "";
-  const full = dlPath
-    ? dlPath.startsWith("http")
-      ? dlPath
-      : `${AUDIOFLOW_ENGINE_URL}${dlPath}`
-    : "";
-
-  return {
-    preset,
-    duration_sec: durationSec,
-    download_url: full,
-  };
-}
-
-async function createBgmFailOpen({ topic, videoType, topicTone, durationSec }) {
-  const preset = pickPreset({ videoType, topicTone, durationSec });
-
-  // 1) AudioFlow first
-  try {
-    return await requestAudioFlowBgm({ topic, preset, durationSec });
-  } catch (e) {
-    console.log("[BGM] audioflow skipped:", e?.message || e);
-  }
-
-  // 2) local generator (if exists)
-  try {
-    const r = await createBgmWav({ topic, preset, durationSec });
-    if (r && r.download_url) {
-      return {
-        preset,
-        duration_sec: durationSec,
-        download_url: r.download_url,
-      };
-    }
-  } catch (e) {
-    console.log("[BGM] local skipped:", e?.message || e);
-  }
-
-  return null;
-}
-
-/* =========================
- * OpenAI call (Chat Completions)
- * ========================= */
-function buildSystemPrompt() {
-  return `
-Return ONLY valid JSON (no markdown, no code fences).
-Schema:
-{
-  "longform": { "title": string, "script": string },
-  "shorts": [
-    { "title": string, "script": string },
-    { "title": string, "script": string },
-    { "title": string, "script": string }
-  ],
-  "thumbnails": [
-    { "text": string }, { "text": string }, { "text": string }
-  ],
-  "recommended_thumbnail_index": 0|1|2
-}
-Rules:
-- Do NOT include any extra keys.
-- Output must be parseable JSON.
-- Write Korean for Korean topics.
-`.trim();
-}
-
-function buildUserPrompt({ topic }) {
-  const safeTopic = (topic || "").toString().trim() || "시니어 대상 설명형 콘텐츠";
-  return `Topic: ${safeTopic}\nGenerate the JSON following the schema exactly.`;
-}
-
-async function callOpenAI({ topic }) {
-  if (!OPENAI_API_KEY) throw new Error("NO_OPENAI_KEY");
-
-  const payload = {
-    model: OPENAI_MODEL,
-    messages: [
-      { role: "system", content: buildSystemPrompt() },
-      { role: "user", content: buildUserPrompt({ topic }) },
-    ],
+  const reqBody = {
+    model: MODEL,
     temperature: 0.6,
+    messages: [
+      { role: "system", content: system },
+      { role: "user", content: user },
+    ],
   };
 
-  const r = await fetchWithTimeout(
-    "https://api.openai.com/v1/chat/completions",
+  console.log("[callOpenAI] REQUEST", { traceId, model: MODEL });
+
+  const res = await fetchWithTimeout(
+    url,
     {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
       },
-      body: JSON.stringify(payload),
+      body: JSON.stringify(reqBody),
     },
     120000
   );
 
-  if (!r.ok) {
-    const t = await r.text().catch(() => "");
-    throw new Error(`OPENAI_HTTP_${r.status}:${t.slice(0, 200)}`);
+  const txt = await res.text();
+  if (!res.ok) {
+    console.log("[callOpenAI] HTTP_ERR", { traceId, status: res.status, bodyHead: txt.slice(0, 200) });
+    throw new Error("OPENAI_HTTP_" + res.status);
   }
 
-  return await r.json();
+  let json;
+  try {
+    json = JSON.parse(txt);
+  } catch (e) {
+    console.log("[callOpenAI] PARSE_ERR_OPENAI_JSON", { traceId, txtHead: txt.slice(0, 200) });
+    throw new Error("OPENAI_BAD_JSON");
+  }
+
+  const rawText = extractOutputText(json);
+  console.log("[callOpenAI] rawTextLen", { traceId, len: rawText.length });
+
+  return { openaiJson: json, rawText };
 }
 
-/* =========================
- * Routes
- * ========================= */
-app.get("/", (req, res) => {
-  res.setHeader("Content-Type", "text/plain; charset=utf-8");
-  res.send(`finishflow-live is running\nBUILD=${BUILD}`);
-});
+// -------------------- core make --------------------
+async function handleMake(traceId, reqBody) {
+  const started = Date.now();
 
-app.get("/health", (req, res) => {
-  res.json({ ok: true, ts: Date.now(), build: BUILD });
-});
+  // input normalize
+  const topic = (reqBody?.topic || "").toString().trim();
+  const videoType = (reqBody?.videoType || "LONG").toString().trim().toUpperCase();
+  const topicTone = (reqBody?.topicTone || "CALM").toString().trim().toUpperCase();
+  const durationSec = Number(reqBody?.durationSec || 900);
 
-// ✅ debug/env (Cannot GET 방지)
-app.get("/debug/env", (req, res) => {
-  res.json({
+  const input = { topic, videoType, topicTone, durationSec };
+
+  // OpenAI
+  const { rawText } = await callOpenAI(traceId, input);
+
+  // parse model output JSON
+  const jsonStr = coerceToJsonString(rawText);
+
+  let data = baseSchema();
+  let code = null;
+
+  try {
+    const parsed = JSON.parse(jsonStr);
+
+    // minimal validation + fill
+    data.longform = parsed.longform || data.longform;
+    data.shorts = Array.isArray(parsed.shorts) && parsed.shorts.length ? parsed.shorts.slice(0, 3) : data.shorts;
+    data.thumbnails =
+      Array.isArray(parsed.thumbnails) && parsed.thumbnails.length
+        ? parsed.thumbnails.slice(0, 3).map((t) => ({ text: (t?.text || "").toString() }))
+        : data.thumbnails;
+
+    const idx = Number(parsed.recommended_thumbnail_index);
+    data.recommended_thumbnail_index = Number.isFinite(idx) ? Math.max(0, Math.min(2, idx)) : 0;
+
+    data.bgm = parsed.bgm || data.bgm;
+    data.meta = { model: MODEL, build: BUILD };
+  } catch (e) {
+    code = "PARSE_FAIL";
+    data = baseSchema();
+  }
+
+  // Always keep stable response shape
+  const resp = {
     ok: true,
-    build: BUILD,
-    now: new Date().toISOString(),
-    node: process.version,
-    hasOpenAIKey: !!process.env.OPENAI_API_KEY,
-    hasAudioFlowUrl: !!process.env.AUDIOFLOW_ENGINE_URL,
-    audioflowUrl: process.env.AUDIOFLOW_ENGINE_URL || null,
-    model: process.env.OPENAI_MODEL || OPENAI_MODEL,
-    rateLimitPerMin: RL_MAX_PER_MIN,
-  });
-});
+    code,
+    data,
+    meta: data.meta,
+    bgm: data.bgm,
+    duration_ms: Date.now() - started,
+  };
 
-/**
- * 핵심 실행 로직
- * body 지원 키:
- * - topic | input | prompt
- * - videoType: "LONG"|"SHORT"
- * - topicTone: "INFO"|"DOCUMENTARY"|"CALM"|"HEALTH" 등
- * - durationSec | duration_sec
- */
-async function handleExecute(req, res) {
-  const body = req.body || {};
-
-  const topic =
-    (body.topic ?? body.input ?? body.prompt ?? "").toString().trim() ||
-    "시니어 대상 설명형 콘텐츠";
-
-  const videoType = (body.videoType || body.video_type || "LONG").toString();
-  const topicTone = (body.topicTone || body.topic_tone || "CALM").toString();
-  const durationSec = Number(body.durationSec || body.duration_sec || 90);
-
-  // 1) BGM (fail-open)
-  let bgmInfo = null;
-  try {
-    bgmInfo = await createBgmFailOpen({ topic, videoType, topicTone, durationSec });
-  } catch (e) {
-    console.log("[BGM] fatal skipped:", e?.message || e);
-  }
-
-  // 2) OpenAI JSON generate
-  let openaiJson;
-  try {
-    openaiJson = await callOpenAI({ topic });
-  } catch (e) {
-    console.log("[OPENAI] failed:", e?.message || e);
-    const data = normalizeResult({}, bgmInfo);
-    return res.status(200).json({ ok: false, code: "E-OPENAI-001", data });
-  }
-
-  // 3) parse 안정화
-  const outText = extractOutputText(openaiJson);
-  const jsonString = coerceToJsonString(outText);
-
-  let parsed;
-  try {
-    parsed = JSON.parse(jsonString);
-  } catch (e) {
-    console.log("[PARSE] failed:", e?.message || e);
-    const data = normalizeResult({}, bgmInfo);
-    return res.status(200).json({ ok: false, code: "E-PARSE-001", data });
-  }
-
-  const data = normalizeResult(parsed, bgmInfo);
-  return res.status(200).json(okPayload(data));
+  return resp;
 }
 
-/**
- * ✅ Main endpoint
- */
-app.post("/execute", rateLimit, async (req, res) => {
-  try {
-    await handleExecute(req, res);
-  } catch (e) {
-    console.log("[EXECUTE] fatal:", e?.message || e);
-    return res.status(200).json(errorPayload("E-FATAL-001", "Unexpected error"));
+// -------------------- HTTP server --------------------
+const server = http.createServer(async (req, res) => {
+  const parsedUrl = url.parse(req.url, true);
+  const path = parsedUrl.pathname || "/";
+  const method = (req.method || "GET").toUpperCase();
+  const traceId = (req.headers["x-trace-id"] || "").toString();
+
+  // CORS preflight
+  if (method === "OPTIONS") {
+    res.writeHead(204, {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, x-trace-id",
+    });
+    return res.end();
   }
+
+  if (method === "GET" && path === "/") {
+    return sendText(res, 200, `finishflow-live is running (${BUILD})`);
+  }
+
+  if (method === "GET" && path === "/health") {
+    return sendJson(res, 200, { ok: true, build: BUILD });
+  }
+
+  if (method === "GET" && path === "/debug/env") {
+    return sendJson(res, 200, {
+      ok: true,
+      build: BUILD,
+      now: new Date().toISOString(),
+      node: process.version,
+      hasOpenAIKey: !!process.env.OPENAI_API_KEY,
+      keyPrefix: (process.env.OPENAI_API_KEY || "").slice(0, 7),
+      model: MODEL,
+      ratelimitPerMin: RATELIMIT_PER_MIN,
+      hasAudioFlowUrl: !!process.env.AUDIOFLOW_URL,
+      audioflowUrl: process.env.AUDIOFLOW_URL || null,
+    });
+  }
+
+  if (method === "POST" && (path === "/make" || path === "/execute" || path === "/api/execute")) {
+    if (!rateLimitCheck()) {
+      return sendJson(res, 429, { ok: false, code: "RATE_LIMIT", message: "Too many requests" });
+    }
+
+    let body;
+    try {
+      body = await readJsonBody(req);
+    } catch (e) {
+      return sendJson(res, 400, { ok: false, code: "BAD_JSON", message: "Invalid JSON body" });
+    }
+
+    try {
+      console.log("[/make] ENTER", { traceId, bodyLen: JSON.stringify(body || {}).length });
+      const out = await handleMake(traceId, body);
+      console.log("[/make] SEND", { traceId, code: out.code });
+      return sendJson(res, 200, out);
+    } catch (e) {
+      console.log("[/make] ERROR", { traceId, err: e?.message });
+      return sendJson(res, 500, { ok: false, code: "SERVER_ERR", message: e?.message || "error" });
+    }
+  }
+
+  return sendJson(res, 404, { ok: false, code: "NOT_FOUND" });
 });
 
-/**
- * ✅ compat
- */
-app.post("/api/execute", rateLimit, async (req, res) => {
-  try {
-    await handleExecute(req, res);
-  } catch (e) {
-    console.log("[API_EXECUTE] fatal:", e?.message || e);
-    return res.status(200).json(errorPayload("E-FATAL-001", "Unexpected error"));
-  }
+server.on("error", (err) => {
+  console.error("Server error:", err);
 });
 
-/**
- * ✅ /make 를 “살린다”
- * - 사람들이 습관적으로 /make 때릴 수 있으니 alias로 고정
- * - 반드시 "/make" (슬래시 포함)
- */
-app.post("/make", rateLimit, async (req, res) => {
-  try {
-    await handleExecute(req, res);
-  } catch (e) {
-    console.log("[MAKE] fatal:", e?.message || e);
-    return res.status(200).json(errorPayload("E-FATAL-001", "Unexpected error"));
-  }
-});
-
-/* =========================
- * Listen
- * ========================= */
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`[finishflow-live] listening on ${PORT}`);
-  console.log(`[BOOT] BUILD=${BUILD}`);
-});
+server.listen(PORT, "0.0.0.0");
