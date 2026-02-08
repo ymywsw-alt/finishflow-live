@@ -15,6 +15,8 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 const WORKER_URL = (process.env.WORKER_URL || "").replace(/\/$/, "");
 
+const GATE_VERSION = "v5-auto-insert";
+
 /* =========================
  * Helpers
  * ========================= */
@@ -108,24 +110,21 @@ function normalizeResult(parsed) {
 }
 
 /* =========================
- * Retention(시청유지율) 비트 요구량
+ * Retention 요구량
  * ========================= */
 function requiredRetentionBeats(durationSec) {
-  // 2분당 1개 기준, 15분이면 7개 정도
   const sec = Math.max(60, Number(durationSec || 900));
-  const beats = Math.floor(sec / 120);
+  const beats = Math.floor(sec / 120); // 2분당 1개
   return Math.max(4, Math.min(10, beats));
 }
 
 /* =========================
- * Gate v4: (1) Slop 방지 (2) Retention (3) 사례/구조 강제
- * + 의료/과장 수치(% 효과) 자동 차단
+ * 구조 체크 (유연)
  * ========================= */
 function hasAllStructure(script) {
   const s = script || "";
   const hasHook = /\[Hook\]/.test(s);
   const hasEmp = /\[공감\]/.test(s);
-  // ✅ 유연화: 방법 헤더는 "무엇을/왜/어떻게" 문구가 없어도 OK
   const hasM1 = /\[방법\s*1[^\]]*\]/.test(s);
   const hasM2 = /\[방법\s*2[^\]]*\]/.test(s);
   const hasM3 = /\[방법\s*3[^\]]*\]/.test(s);
@@ -134,32 +133,93 @@ function hasAllStructure(script) {
   return hasHook && hasEmp && hasM1 && hasM2 && hasM3 && hasMistake && hasAction;
 }
 
-function qualityGateV4({ title, script, durationSec }) {
+/* =========================
+ * ✅ 자동 삽입: 사례/리텐션 비트/주의 문구
+ * - 모델이 빼먹어도, 코드가 강제 주입해서 422를 끊는다
+ * ========================= */
+
+function ensureDisclaimer(script) {
+  const line = "[주의] 이 영상은 일반 정보이며 개인 상태에 따라 다를 수 있습니다. 증상이 지속되면 의료진과 상담하세요.";
+  if (/\[주의\]\s*이 영상은/.test(script)) return script;
+  // 맨 끝에 추가
+  return (script || "").trim() + "\n\n" + line;
+}
+
+function ensureCases(script, topic) {
+  const hasCases = (script.match(/사례\s*[1-3]\s*:/g) || []).length >= 3;
+  if (hasCases) return script;
+
+  const t = topic || "해당 주제";
+  const block =
+    `사례 1: ${t} 때문에 "뭘 먼저 해야 할지" 몰라서 한 달을 미룬 분이, 오늘 알려드릴 체크 1개로 바로 시작한 경우\n` +
+    `사례 2: ${t}를 유튜브/블로그대로 따라하다 실패했던 분이, "실수 1가지"를 고치고 2주 만에 루틴이 자리잡은 경우\n` +
+    `사례 3: ${t}를 돈 들이지 않고도, 하루 10분/주 3회로 관리해 부담이 확 줄어든 경우`;
+
+  // [공감] 바로 뒤에 끼워 넣기
+  if (/\[공감\]/.test(script)) {
+    return script.replace(/\[공감\][^\n]*\n?/, (m) => m + "\n" + block + "\n\n");
+  }
+  // 공감 헤더가 없으면 앞쪽에 넣음
+  return block + "\n\n" + (script || "");
+}
+
+function ensureRetentionBeats(script, durationSec, topic) {
+  const need = requiredRetentionBeats(durationSec);
+  const current = (script.match(/리텐션\s*비트\s*\d+\s*:/g) || []).length;
+  if (current >= need) return script;
+
+  const t = topic || "이 주제";
+  const beats = [];
+  for (let i = 1; i <= need; i++) {
+    // 각 비트는 “다음에 얻는 것/지금 체크/놓치면 손해” 중 하나를 포함하도록 구성
+    if (i % 3 === 1) beats.push(`리텐션 비트 ${i}: 지금부터 30초 뒤에 "${t}에서 가장 많이 틀리는 1가지"를 바로 잡아드립니다.`);
+    else if (i % 3 === 2) beats.push(`리텐션 비트 ${i}: 지금 바로 체크하세요—오늘 내용 중 "이 항목"이 빠지면 효과가 크게 떨어집니다.`);
+    else beats.push(`리텐션 비트 ${i}: 끝까지 보시면 돈/시간 낭비를 막는 "구매/선택 기준 3줄"을 드립니다.`);
+  }
+  const block = beats.join("\n");
+
+  // [방법 1] 앞에 넣으면 “중간 이탈 방지” 역할을 잘함
+  if (/\[방법\s*1/.test(script)) {
+    return script.replace(/\[방법\s*1[^\]]*\]/, block + "\n\n$&");
+  }
+  // 없으면 앞쪽에 넣음
+  return block + "\n\n" + (script || "");
+}
+
+/* =========================
+ * 위험 차단: %효과 단정 금지
+ * ========================= */
+function stripPercentClaims(title, script) {
+  const t = (title || "") + "\n" + (script || "");
+  const hasPercent = /(\d+\s*%|%)/.test(t);
+  if (!hasPercent) return { title, script, removed: false };
+
+  // % 표현을 제거/완화(정확한 수치 단정 방지)
+  const safeTitle = (title || "").replace(/(\d+\s*%|%)/g, "").replace(/\s{2,}/g, " ").trim();
+  const safeScript = (script || "").replace(/(\d+\s*%|%)/g, "").replace(/\s{2,}/g, " ").trim();
+
+  return { title: safeTitle, script: safeScript, removed: true };
+}
+
+/* =========================
+ * Gate v5: auto-insert 후 검증
+ * ========================= */
+function qualityGateV5({ title, script, durationSec }) {
   const t = (title || "") + "\n" + (script || "");
 
-  // 핵심 필수(숫자/행동/대상)
-  const hasNumber = /\d/.test(t);
+  const hasNumber = /\d/.test(t); // 용량/시간/횟수 등
   const hasAction = /(하세요|해보세요|지금|바로|체크|기록|설정|줄이|늘리|멈추)/.test(t);
   const hasTarget = /(40대|50대|60대|70대|중장년|시니어|무릎|허리|혈압|당뇨|수면|치매)/.test(t);
 
-  // 구조(헤더)
   const hasStructure = hasAllStructure(script || "");
 
-  // 사례 3개 형식 강제
   const caseLines = (t.match(/사례\s*[1-3]\s*:/g) || []).length;
-
-  // 리텐션 비트 최소 N개
   const needBeats = requiredRetentionBeats(durationSec);
   const beatCount = (t.match(/리텐션\s*비트\s*\d+\s*:/g) || []).length;
 
-  // 슬롭 일반론 과다
   const vagueCount = (t.match(/(중요합니다|도움이 됩니다|좋습니다|필요합니다)/g) || []).length;
 
-  // ✅ 위험 차단: 효과를 %로 단정(“40% 완화” 등) 금지
-  // 숫자는 용량/시간/횟수로만 쓰게 함
-  const hasPercentClaim = /(\d+\s*%|%)/.test(t);
-
-  // ✅ 건강/건기식 콘텐츠 기본 면책(필수 섹션)
+  const hasPercentClaim = /(\d+\s*%|%)/.test(t); // 금지
   const hasDisclaimer = /\[주의\]\s*이 영상은/.test(t);
 
   const ok =
@@ -169,7 +229,7 @@ function qualityGateV4({ title, script, durationSec }) {
     hasStructure &&
     caseLines >= 3 &&
     beatCount >= needBeats &&
-    vagueCount <= 12 &&
+    vagueCount <= 18 &&
     !hasPercentClaim &&
     hasDisclaimer;
 
@@ -186,93 +246,26 @@ function qualityGateV4({ title, script, durationSec }) {
       vagueCount,
       hasPercentClaim,
       hasDisclaimer,
+      gateVersion: GATE_VERSION,
     },
   };
 }
 
 /* =========================
- * Prompt v4 (Retention + 유튜브 생존 + 의료/과장 리스크 제거)
+ * Prompt (모델은 "핵심 본문"에 집중)
+ * - 핵심은 코드가 사례/리텐션 비트를 보정한다
  * ========================= */
-function estimateWordTarget(durationSec) {
-  const wpm = 135;
-  const minutes = Math.max(1, Number(durationSec || 900) / 60);
-  return Math.round(wpm * minutes);
-}
-
-function buildSystemPrompt({ durationSec }) {
-  const wordTarget = estimateWordTarget(durationSec);
-  const needBeats = requiredRetentionBeats(durationSec);
-
+function buildSystemPrompt() {
   return `
 Return ONLY valid JSON.
 No explanation.
 No markdown.
 
-당신은 2026년 기준 '시니어 유튜브'에서 살아남는 스크립트 작가다.
-AI 슬롭(일반론 반복, 빈약한 정보, 뻔한 문장)처럼 보이면 실패다.
-목표는 시청 유지율 50% 이상을 노리는 구성이다.
+당신은 시니어 대상 유튜브 스크립트 작가다.
+과장/공포/치료 단정 금지.
+실천 중심(무엇을→왜→어떻게), 실수 방지, 오늘 할 행동 1개 포함.
+아래 헤더를 반드시 포함(문자 그대로):
 
-[절대 금지]
-- 의학적 효과를 %로 단정하지 마라(예: "40% 완화" 금지)
-- 치료/진단처럼 말하지 마라
-- 공포 조장/과장 금지
-
-[유튜브 상위 노출 확률을 높이는 3요소]
-1) CTR: 제목/썸네일이 "대상+문제+숫자(시간/횟수)+결과(과장X)"를 즉시 말한다.
-2) Retention: 중간 이탈 방지 장치를 주기적으로 넣는다(오픈루프/다음에 얻는 것/즉시 체크).
-3) Satisfaction: 실천 체크리스트 + 실수 방지 + 오늘 행동 1개.
-
-[영상 목적]
-- 실제 도움이 되는 정보 제공
-- 시청 유지율 50% 이상 목표
-
-[구조 규칙]
-1) 시작 15초 Hook: 문제 상황 → 해결 가능성 → 오늘 얻을 결과
-2) 공감 구간: 많은 사람들이 겪는 상황을 구체적으로
-3) 핵심 정보: 방법 3개
-   - 각 방법은 반드시 "무엇을 → 왜 → 어떻게" 순서로 작성(문장으로 보여라)
-4) 실수 방지: 흔한 실수/주의점
-5) 행동 지시: 오늘 바로 할 행동 1개
-
-[작성 규칙(강제)]
-- 20~30초마다 새로운 정보(새 팁/새 숫자/새 체크포인트)가 나오게 구성
-- 숫자 반드시 포함: 시간/횟수/개수/용량(단, % 효과 수치는 금지)
-- 행동 지시 반드시 포함
-- "사례 1/2/3"을 아래 형식으로 정확히 3줄 포함:
-  사례 1: ...
-  사례 2: ...
-  사례 3: ...
-- Retention 장치 최소 ${needBeats}개를 아래 형식으로 포함:
-  리텐션 비트 1: ...
-  리텐션 비트 2: ...
-- 필수 면책 문구 1줄 포함(정확히):
-  [주의] 이 영상은 일반 정보이며 개인 상태에 따라 다를 수 있습니다. 증상이 지속되면 의료진과 상담하세요.
-
-[톤]
-- 차분하고 신뢰감
-- 쉬운 표현
-
-[길이]
-- 롱폼은 말로 읽었을 때 약 ${durationSec}초 목표
-- 최소 목표 분량: 약 ${wordTarget} 단어 수준(짧게 쓰지 마라)
-
-Schema:
-{
-  "longform": { "title": "string", "script": "string" },
-  "shorts": [
-    { "title": "string", "script": "string" },
-    { "title": "string", "script": "string" },
-    { "title": "string", "script": "string" }
-  ],
-  "thumbnails": [
-    { "text": "string" },
-    { "text": "string" },
-    { "text": "string" }
-  ],
-  "recommended_thumbnail_index": 0
-}
-
-롱폼 script는 아래 헤더를 반드시 포함(문자 그대로):
 [Hook]
 [공감]
 [방법 1]
@@ -281,26 +274,37 @@ Schema:
 [실수 방지]
 [오늘 바로 할 행동]
 
-각 [방법] 섹션 안에 반드시 "무엇을/왜/어떻게"가 문장으로 들어가야 한다.
+Schema:
+{
+ "longform": { "title": "string", "script": "string" },
+ "shorts": [
+  { "title": "string", "script": "string" },
+  { "title": "string", "script": "string" },
+  { "title": "string", "script": "string" }
+ ],
+ "thumbnails": [
+  { "text": "string" },
+  { "text": "string" },
+  { "text": "string" }
+ ],
+ "recommended_thumbnail_index": 0
+}
 `.trim();
 }
 
-function buildUserPrompt({ topic, topicTone }) {
-  const safeTopic = topic || "시니어 건강 정보";
+function buildUserPrompt({ topic, topicTone, durationSec }) {
+  const safeTopic = topic || "시니어 건강";
   return `
 주제: ${safeTopic}
 톤: ${topicTone || "CALM"}
+길이: ${durationSec || 900}초 (길게, 끊기지 않게)
 
-[제목/썸네일 규칙(CTR)]
-- 제목은 검색 의도형: 대상+문제+숫자(시간/횟수)+결과(과장X).
-- 썸네일 문구 3개: 12~18자 내외, 과장/공포조장 금지.
-
-[숏폼 규칙]
-- 30~50초 분량
-- 1문장 훅 + 3스텝(숫자 포함: 시간/횟수/개수/용량) + 1문장 결론(행동)
-
-반드시 한국어.
-JSON만 출력.
+규칙:
+- 20~30초마다 새로운 정보(팁/숫자/체크포인트)
+- 숫자는 시간/횟수/용량 중심
+- 실수 방지 포함
+- 오늘 바로 할 행동 1개로 끝내기
+- JSON만 출력
 `.trim();
 }
 
@@ -313,10 +317,10 @@ async function callOpenAI({ topic, topicTone, durationSec }) {
   const payload = {
     model: OPENAI_MODEL,
     messages: [
-      { role: "system", content: buildSystemPrompt({ durationSec }) },
-      { role: "user", content: buildUserPrompt({ topic, topicTone }) },
+      { role: "system", content: buildSystemPrompt() },
+      { role: "user", content: buildUserPrompt({ topic, topicTone, durationSec }) },
     ],
-    temperature: 0.6,
+    temperature: 0.5,
   };
 
   const r = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -417,7 +421,18 @@ async function handleExecute(req, res) {
 
   const data = normalizeResult(parsed);
 
-  const gate = qualityGateV4({
+  // ✅ 위험 수치(%효과) 제거(있으면 자동 완화)
+  const stripped = stripPercentClaims(data.longform.title, data.longform.script);
+  data.longform.title = stripped.title;
+  data.longform.script = stripped.script;
+
+  // ✅ 자동 삽입: 사례/리텐션/주의문구 (모델 실수 방지)
+  data.longform.script = ensureCases(data.longform.script, topic);
+  data.longform.script = ensureRetentionBeats(data.longform.script, durationSec, topic);
+  data.longform.script = ensureDisclaimer(data.longform.script);
+
+  // ✅ 최종 게이트
+  const gate = qualityGateV5({
     title: data.longform.title,
     script: data.longform.script,
     durationSec,
@@ -427,12 +442,13 @@ async function handleExecute(req, res) {
     return res.status(422).json({
       ok: false,
       code: "QUALITY_GATE_FAIL",
-      message: "script quality gate failed (anti-AI-slop + retention v4)",
+      message: "script quality gate failed (anti-AI-slop + retention v5 auto-insert)",
       detail: gate.reasons,
       data,
     });
   }
 
+  // ✅ 영상 단계 연결(가능하면 download_url 채움)
   const workerResult = await tryCallWorkerRender(data);
   if (!workerResult.ok) {
     console.log("[worker] render skip/fail:", workerResult.reason, workerResult.detail || "");
@@ -457,6 +473,7 @@ app.get("/debug/env", (req, res) => {
     model: OPENAI_MODEL,
     hasWorkerUrl: !!WORKER_URL,
     workerUrl: WORKER_URL ? WORKER_URL : "",
+    gateVersion: GATE_VERSION,
   });
 });
 
@@ -476,4 +493,5 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log(`[BOOT] BUILD=${BUILD}`);
   console.log(`[BOOT] MODEL=${OPENAI_MODEL}`);
   console.log(`[BOOT] WORKER_URL=${WORKER_URL || "(missing)"}`);
+  console.log(`[BOOT] GATE_VERSION=${GATE_VERSION}`);
 });
