@@ -1,3 +1,9 @@
+// finishflow-live / make.js  (FULL REPLACE)
+// - ES Module style (works on Node 18+; may show a harmless warning if package.json lacks "type":"module")
+// - Reads ./req.json
+// - Generates script -> TTS mp3 -> ffprobe duration -> ffmpeg mp4 (+ optional AudioFlow BGM mix)
+// - Prints ONE JSON line at the end (server.js parses the last JSON line)
+
 import crypto from "crypto";
 import fs from "fs";
 import os from "os";
@@ -9,35 +15,9 @@ import { createRequire } from "module";
 const require = createRequire(import.meta.url);
 let selectBGMPreset = null;
 try {
-  // ./lib/bgm_selector.js is CommonJS now
   ({ selectBGMPreset } = require("./lib/bgm_selector"));
 } catch {
-  // fail-open: selector missing -> fallback logic later
-  selectBGMPreset = null;
-}
-
-// ====== in-memory token store (TTL) ======
-const tokenStore = new Map(); // token -> { filePath, expiresAt }
-const TTL_MS = 30 * 60 * 1000; // 30 minutes
-
-function putToken(token, filePath) {
-  const expiresAt = Date.now() + TTL_MS;
-  tokenStore.set(token, { filePath, expiresAt });
-
-  // best-effort cleanup
-  for (const [k, v] of tokenStore.entries()) {
-    if (v.expiresAt < Date.now()) tokenStore.delete(k);
-  }
-}
-
-export function getDownloadPathByToken(token) {
-  const v = tokenStore.get(token);
-  if (!v) return null;
-  if (v.expiresAt < Date.now()) {
-    tokenStore.delete(token);
-    return null;
-  }
-  return v.filePath;
+  selectBGMPreset = null; // fail-open
 }
 
 // ====== helpers ======
@@ -76,21 +56,18 @@ function safeFileName(s) {
 
 // 간단 전처리(발음 개선 최소치)
 function preprocessKoreanTTS(text) {
-  let t = text;
+  let t = String(text || "");
 
-  // 숫자/기호 기본 정리(최소)
   t = t.replace(/~/g, "에서 ");
   t = t.replace(/\bAI\b/gi, "에이아이");
   t = t.replace(/\s+/g, " ").trim();
 
-  // 너무 긴 문장 쪼개기: 마침표/물음표/느낌표 기준
-  // (OpenAI TTS가 긴 문장에 약한 케이스 완화)
+  // 너무 긴 문장 쪼개기: 문장부호/종결 기준
   const parts = t
     .split(/(?<=[\.\!\?]|다\.)\s+/)
     .map((x) => x.trim())
     .filter(Boolean);
 
-  // 부분을 다시 합치되, 쉼표를 넣어 호흡 유도
   return parts.join(", ");
 }
 
@@ -136,21 +113,19 @@ async function openaiBinary(url, body) {
   return Buffer.from(ab);
 }
 
-// 스크립트 생성: (안전한 “짧고 명확” 톤)
+// ====== Script generation (spoken style) ======
 async function generateScript(topic) {
-  // Chat Completions (안정적)
   const data = await openaiJSON("https://api.openai.com/v1/chat/completions", {
     model: "gpt-4o-mini",
     messages: [
-        {
-  role: "system",
-  content: "You write Korean voiceover scripts that sound natural for middle-aged/older audiences. Use short spoken sentences. Add natural pauses. Sound like a calm YouTube narrator speaking slowly and clearly. Avoid hype."
-},
-
+      {
+        role: "system",
+        content:
+          "You write Korean voiceover scripts that sound natural for middle-aged/older audiences. Use short spoken sentences. Add natural pauses. Sound like a calm YouTube narrator speaking slowly and clearly. Avoid hype."
       },
       {
         role: "user",
-        content: `주제: "${topic}"\n\n요구사항:\n- 45~60초 분량\n- 문장 짧게\n- 어려운 용어 금지\n- 마지막은 행동 1가지로 끝내기\n\n스크립트만 출력`
+        content: `주제: "${topic}"\n\n요구사항:\n- 45~60초 분량\n- 문장 짧게\n- 어려운 용어 금지\n- 마지막은 행동 1가지로 끝내기\n- 말하듯이 쓰기 (설명문체 금지)\n\n스크립트만 출력`
       }
     ],
     temperature: 0.4
@@ -161,8 +136,9 @@ async function generateScript(topic) {
   return text;
 }
 
-// TTS 생성 (mp3)
-// 모델/보이스는 계정/정책에 따라 다를 수 있어, 가장 범용인 tts-1 사용
+// ====== TTS (mp3) ======
+// 업그레이드: gpt-4o-mini-tts (체감 품질 상승)
+// voice/speed는 유지
 async function generateTTSMp3(scriptText) {
   const cleaned = preprocessKoreanTTS(scriptText);
 
@@ -199,7 +175,6 @@ async function getDurationSeconds(audioPath) {
     throw new Error(`Invalid duration from ffprobe: "${s}"`);
   }
 
-  // 너무 짧아지지 않게 최소 3초 보정
   return Math.max(3, val);
 }
 
@@ -213,7 +188,6 @@ function getAudioflowEngineUrl() {
 }
 
 function pickPreset({ durationSec = 60 }) {
-  // selector가 있으면 사용, 없으면 최소 fallback
   try {
     if (typeof selectBGMPreset === "function") {
       return selectBGMPreset({
@@ -311,8 +285,6 @@ async function renderMp4({ title, voiceAudioPath, bgmPath, outPath, durationSec 
   }
 
   // BGM 포함(음성 + BGM 믹싱)
-  // - bgm은 loop, durationSec만큼 잘라서
-  // - 음성 1.0 / bgm 0.35로 안정 믹스
   const args = [
     "-y",
     "-f",
@@ -411,39 +383,36 @@ export async function makeVideo({ topic }) {
   // 3) duration
   const durationSec = await getDurationSeconds(voicePath);
 
-  // 4) (NEW) try AudioFlow BGM (fail-open)
+  // 4) try AudioFlow BGM (fail-open)
   let bgmInfo = null;
   let bgmPath = null;
   try {
     bgmInfo = await requestAudioFlowBgm({ topic, durationSec });
     if (bgmInfo?.download_url) {
       await downloadToFile(bgmInfo.download_url, bgmLocalPath);
-      // 다운로드 성공하면 믹싱에 사용
       bgmPath = bgmLocalPath;
     }
   } catch (e) {
-    // fail-open: bgm 없이도 영상 생성은 계속
     console.log("[BGM] skipped:", e?.message || e);
     bgmInfo = null;
     bgmPath = null;
   }
 
-  // 5) render mp4 (duration = voice duration)  + (optional) bgm mix
+  // 5) render mp4
   await renderMp4({
     title: topic,
     voiceAudioPath: voicePath,
-    bgmPath, // 있으면 믹싱
+    bgmPath,
     outPath: mp4Path,
     durationSec
   });
 
-  // 6) validate playable mp4
+  // 6) validate
   await validateMp4(mp4Path);
 
-  // 7) token for download
-  const token = crypto.randomBytes(12).toString("hex");
-  putToken(token, mp4Path);
-
+  // NOTE:
+  // - server.js now issues the FINAL download token.
+  // - We still return video_path for server.js to create its own token.
   return {
     ok: true,
     step: 4,
@@ -451,43 +420,49 @@ export async function makeVideo({ topic }) {
     audio_generated: true,
     video_generated: true,
     video_path: mp4Path,
-    download_url: `/download?token=${token}`,
     meta: {
       duration_sec: Math.round(durationSec),
       tts_input_preview: cleaned.slice(0, 120),
-      // NEW: bgm meta (useful for debugging)
       bgm_used: !!bgmPath,
       bgm_preset: bgmInfo?.preset || "",
       bgm_download_url: bgmInfo?.download_url || ""
     }
   };
-}// ====== CLI entry (so `node make.js` actually runs) ======
+}
+
+// ====== direct run: read req.json and print JSON ======
+function readReqJson() {
+  const p = path.join(process.cwd(), "req.json");
+  const raw = fs.readFileSync(p, "utf-8");
+  const j = JSON.parse(raw);
+  return j || {};
+}
+
 async function main() {
-  try {
-    // req.json 읽기 (server.js가 먼저 써둠)
-    const reqPath = path.join(process.cwd(), "req.json");
-    const raw = fs.readFileSync(reqPath, "utf-8");
-    const req = JSON.parse(raw);
+  const req = readReqJson();
+  const topic = typeof req?.topic === "string" ? req.topic.trim() : "";
+  if (!topic) throw new Error("req.json missing topic");
 
-    const topic = (req?.topic || "").toString().trim();
-    if (!topic) throw new Error("req.json missing topic");
+  const r = await makeVideo({ topic });
 
-    // 실행
-    const result = await makeVideo({ topic });
+  // Print exactly one JSON line at the end (server.js parses this)
+  console.log(JSON.stringify(r));
+}
 
-    // server.js가 잡아갈 수 있게 "한 줄 JSON"로 출력
-    console.log(JSON.stringify(result));
-    process.exit(0);
-  } catch (e) {
-    console.error(e?.message || String(e));
+// ESM direct-run detection
+const isDirectRun =
+  process.argv[1] &&
+  (import.meta.url.endsWith(process.argv[1].replace(/\\/g, "/")) ||
+    import.meta.url.endsWith("file://" + process.argv[1].replace(/\\/g, "/")));
+
+if (isDirectRun) {
+  main().catch((e) => {
+    const out = {
+      ok: false,
+      error: e?.message || String(e),
+      where: "make.js"
+    };
+    console.log(JSON.stringify(out));
     process.exit(1);
-  }
+  });
 }
-
-// ESM에서 직접 실행될 때만 main() 호출
-// ====== CLI entry (always run when called by `node make.js`) ======
-if (process.argv.some((a) => a.endsWith("make.js"))) {
-  main();
-}
-
-
