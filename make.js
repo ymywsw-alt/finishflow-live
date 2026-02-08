@@ -166,7 +166,7 @@ async function generateTTSMp3(scriptText) {
   const cleaned = preprocessKoreanTTS(scriptText);
 
   const mp3 = await openaiBinary("https://api.openai.com/v1/audio/speech", {
-    model: "tts-1",
+    model: "gpt-4o-mini-tts",
     voice: "alloy",
     format: "mp3",
     speed: 0.97,
