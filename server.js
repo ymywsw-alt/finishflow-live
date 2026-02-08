@@ -108,59 +108,70 @@ function normalizeResult(parsed) {
 }
 
 /* =========================
- * Retention/SEO 계산(게이트 기준용)
+ * Retention(시청유지율) 비트 요구량
  * ========================= */
-
 function requiredRetentionBeats(durationSec) {
-  // 8~12분(480~720)면 최소 4~6개, 15분(900)면 최소 7개 정도로 강제(너무 빡세지 않게)
+  // 2분당 1개 기준, 15분이면 7개 정도
   const sec = Math.max(60, Number(durationSec || 900));
-  const beats = Math.floor(sec / 120); // 2분마다 최소 1번 리텐션 비트
+  const beats = Math.floor(sec / 120);
   return Math.max(4, Math.min(10, beats));
 }
 
 /* =========================
- * AI Slop 방지 + Retention 게이트 v3
+ * Gate v4: (1) Slop 방지 (2) Retention (3) 사례/구조 강제
+ * + 의료/과장 수치(% 효과) 자동 차단
  * ========================= */
+function hasAllStructure(script) {
+  const s = script || "";
+  const hasHook = /\[Hook\]/.test(s);
+  const hasEmp = /\[공감\]/.test(s);
+  // ✅ 유연화: 방법 헤더는 "무엇을/왜/어떻게" 문구가 없어도 OK
+  const hasM1 = /\[방법\s*1[^\]]*\]/.test(s);
+  const hasM2 = /\[방법\s*2[^\]]*\]/.test(s);
+  const hasM3 = /\[방법\s*3[^\]]*\]/.test(s);
+  const hasMistake = /\[(실수\s*방지|주의)\]/.test(s);
+  const hasAction = /\[오늘\s*바로\s*할\s*행동\]/.test(s);
+  return hasHook && hasEmp && hasM1 && hasM2 && hasM3 && hasMistake && hasAction;
+}
 
-function qualityGateV3({ title, script, durationSec }) {
+function qualityGateV4({ title, script, durationSec }) {
   const t = (title || "") + "\n" + (script || "");
 
-  // 기본 필수
+  // 핵심 필수(숫자/행동/대상)
   const hasNumber = /\d/.test(t);
-  const hasAction = /(하세요|해보세요|지금|바로|체크|멈추|줄이|늘리|기록|설정)/.test(t);
+  const hasAction = /(하세요|해보세요|지금|바로|체크|기록|설정|줄이|늘리|멈추)/.test(t);
   const hasTarget = /(40대|50대|60대|70대|중장년|시니어|무릎|허리|혈압|당뇨|수면|치매)/.test(t);
 
-  // 사례 3개를 "형식"으로 강제
+  // 구조(헤더)
+  const hasStructure = hasAllStructure(script || "");
+
+  // 사례 3개 형식 강제
   const caseLines = (t.match(/사례\s*[1-3]\s*:/g) || []).length;
-  const has3Cases = caseLines >= 3;
 
-  // 구조(섹션 헤더)
-  const hasStructure =
-    /\[Hook\]/.test(t) &&
-    /\[공감\]/.test(t) &&
-    /\[방법 1: 무엇을\/왜\/어떻게\]/.test(t) &&
-    /\[방법 2: 무엇을\/왜\/어떻게\]/.test(t) &&
-    /\[방법 3: 무엇을\/왜\/어떻게\]/.test(t) &&
-    /\[실수 방지\]/.test(t) &&
-    /\[오늘 바로 할 행동\]/.test(t);
-
-  // Retention 비트(중간 이탈 방지 장치)
-  // 모델이 20~30초마다 새 정보를 주되, 최소한 2분마다 '리텐션 비트'를 넣게 강제
-  const beatCount = (t.match(/리텐션 비트\s*\d+\s*:/g) || []).length;
+  // 리텐션 비트 최소 N개
   const needBeats = requiredRetentionBeats(durationSec);
-  const hasBeats = beatCount >= needBeats;
+  const beatCount = (t.match(/리텐션\s*비트\s*\d+\s*:/g) || []).length;
 
-  // 슬롭 일반론 과다 방지
+  // 슬롭 일반론 과다
   const vagueCount = (t.match(/(중요합니다|도움이 됩니다|좋습니다|필요합니다)/g) || []).length;
+
+  // ✅ 위험 차단: 효과를 %로 단정(“40% 완화” 등) 금지
+  // 숫자는 용량/시간/횟수로만 쓰게 함
+  const hasPercentClaim = /(\d+\s*%|%)/.test(t);
+
+  // ✅ 건강/건기식 콘텐츠 기본 면책(필수 섹션)
+  const hasDisclaimer = /\[주의\]\s*이 영상은/.test(t);
 
   const ok =
     hasNumber &&
     hasAction &&
     hasTarget &&
     hasStructure &&
-    has3Cases &&
-    hasBeats &&
-    vagueCount <= 12;
+    caseLines >= 3 &&
+    beatCount >= needBeats &&
+    vagueCount <= 12 &&
+    !hasPercentClaim &&
+    hasDisclaimer;
 
   return {
     ok,
@@ -173,16 +184,17 @@ function qualityGateV3({ title, script, durationSec }) {
       needBeats,
       beatCount,
       vagueCount,
+      hasPercentClaim,
+      hasDisclaimer,
     },
   };
 }
 
 /* =========================
- * Prompt (유튜브 생존형 v3: Retention + SEO/CTR 내장)
+ * Prompt v4 (Retention + 유튜브 생존 + 의료/과장 리스크 제거)
  * ========================= */
-
 function estimateWordTarget(durationSec) {
-  const wpm = 135; // 시니어 차분 톤
+  const wpm = 135;
   const minutes = Math.max(1, Number(durationSec || 900) / 60);
   return Math.round(wpm * minutes);
 }
@@ -198,12 +210,17 @@ No markdown.
 
 당신은 2026년 기준 '시니어 유튜브'에서 살아남는 스크립트 작가다.
 AI 슬롭(일반론 반복, 빈약한 정보, 뻔한 문장)처럼 보이면 실패다.
-목표는 "시청 유지율 50% 이상"을 노리는 구성이다.
+목표는 시청 유지율 50% 이상을 노리는 구성이다.
 
-[유튜브 상위 노출 확률을 높이는 3요소(코드 강제)]
-1) CTR: 제목/썸네일이 "누가/무슨 문제/얼마나/결과"를 즉시 말한다(과장·공포 금지).
-2) Retention: 중간 이탈 방지 장치를 주기적으로 넣는다(오픈루프/다음에 얻는 것/즉시 적용).
-3) Satisfaction: 실천 가능한 체크리스트/숫자/주의사항/오늘 행동 1개로 끝낸다.
+[절대 금지]
+- 의학적 효과를 %로 단정하지 마라(예: "40% 완화" 금지)
+- 치료/진단처럼 말하지 마라
+- 공포 조장/과장 금지
+
+[유튜브 상위 노출 확률을 높이는 3요소]
+1) CTR: 제목/썸네일이 "대상+문제+숫자(시간/횟수)+결과(과장X)"를 즉시 말한다.
+2) Retention: 중간 이탈 방지 장치를 주기적으로 넣는다(오픈루프/다음에 얻는 것/즉시 체크).
+3) Satisfaction: 실천 체크리스트 + 실수 방지 + 오늘 행동 1개.
 
 [영상 목적]
 - 실제 도움이 되는 정보 제공
@@ -213,22 +230,23 @@ AI 슬롭(일반론 반복, 빈약한 정보, 뻔한 문장)처럼 보이면 실
 1) 시작 15초 Hook: 문제 상황 → 해결 가능성 → 오늘 얻을 결과
 2) 공감 구간: 많은 사람들이 겪는 상황을 구체적으로
 3) 핵심 정보: 방법 3개
-   - 각 방법은 반드시 "무엇을 → 왜 → 어떻게" 순서
+   - 각 방법은 반드시 "무엇을 → 왜 → 어떻게" 순서로 작성(문장으로 보여라)
 4) 실수 방지: 흔한 실수/주의점
 5) 행동 지시: 오늘 바로 할 행동 1개
 
 [작성 규칙(강제)]
 - 20~30초마다 새로운 정보(새 팁/새 숫자/새 체크포인트)가 나오게 구성
-- 숫자 반드시 포함(시간/횟수/개수 등)
+- 숫자 반드시 포함: 시간/횟수/개수/용량(단, % 효과 수치는 금지)
 - 행동 지시 반드시 포함
 - "사례 1/2/3"을 아래 형식으로 정확히 3줄 포함:
   사례 1: ...
   사례 2: ...
   사례 3: ...
-- Retention 장치(중간 이탈 방지) 최소 ${needBeats}개를 아래 형식으로 포함:
+- Retention 장치 최소 ${needBeats}개를 아래 형식으로 포함:
   리텐션 비트 1: ...
   리텐션 비트 2: ...
-  (각 비트는 '다음에 얻는 것/지금 체크/놓치면 손해' 중 하나를 포함)
+- 필수 면책 문구 1줄 포함(정확히):
+  [주의] 이 영상은 일반 정보이며 개인 상태에 따라 다를 수 있습니다. 증상이 지속되면 의료진과 상담하세요.
 
 [톤]
 - 차분하고 신뢰감
@@ -254,32 +272,32 @@ Schema:
   "recommended_thumbnail_index": 0
 }
 
-롱폼 script는 아래 섹션 헤더를 반드시 포함:
+롱폼 script는 아래 헤더를 반드시 포함(문자 그대로):
 [Hook]
 [공감]
-[방법 1: 무엇을/왜/어떻게]
-[방법 2: 무엇을/왜/어떻게]
-[방법 3: 무엇을/왜/어떻게]
+[방법 1]
+[방법 2]
+[방법 3]
 [실수 방지]
 [오늘 바로 할 행동]
 
+각 [방법] 섹션 안에 반드시 "무엇을/왜/어떻게"가 문장으로 들어가야 한다.
 `.trim();
 }
 
 function buildUserPrompt({ topic, topicTone }) {
   const safeTopic = topic || "시니어 건강 정보";
-
   return `
 주제: ${safeTopic}
 톤: ${topicTone || "CALM"}
 
 [제목/썸네일 규칙(CTR)]
-- 제목: 검색 의도형(문제+대상+숫자+결과)로 작성. 예: "60대 무릎통증, 3분 루틴으로 30% 줄이는 법"
-- 썸네일 문구 3개: 12~18자 내외로 간결하게. 과장/공포조장 금지(신뢰 우선).
+- 제목은 검색 의도형: 대상+문제+숫자(시간/횟수)+결과(과장X).
+- 썸네일 문구 3개: 12~18자 내외, 과장/공포조장 금지.
 
 [숏폼 규칙]
 - 30~50초 분량
-- 1문장 훅 + 3스텝(숫자 포함) + 1문장 결론(행동 지시)
+- 1문장 훅 + 3스텝(숫자 포함: 시간/횟수/개수/용량) + 1문장 결론(행동)
 
 반드시 한국어.
 JSON만 출력.
@@ -289,7 +307,6 @@ JSON만 출력.
 /* =========================
  * OpenAI Call
  * ========================= */
-
 async function callOpenAI({ topic, topicTone, durationSec }) {
   if (!OPENAI_API_KEY) throw new Error("NO_OPENAI_KEY");
 
@@ -322,7 +339,6 @@ async function callOpenAI({ topic, topicTone, durationSec }) {
 /* =========================
  * Worker Call (영상 단계 연결)
  * ========================= */
-
 async function tryCallWorkerRender(data) {
   if (!WORKER_URL) return { ok: false, reason: "NO_WORKER_URL" };
 
@@ -346,9 +362,7 @@ async function tryCallWorkerRender(data) {
 
     const text = await r.text();
     let j = null;
-    try {
-      j = JSON.parse(text);
-    } catch (_) {}
+    try { j = JSON.parse(text); } catch (_) {}
 
     if (!r.ok) {
       return { ok: false, reason: "WORKER_HTTP_" + r.status, detail: text.slice(0, 500) };
@@ -376,7 +390,6 @@ async function tryCallWorkerRender(data) {
 /* =========================
  * Main Execute
  * ========================= */
-
 async function handleExecute(req, res) {
   const body = req.body || {};
   const topic = body.topic || "시니어 건강";
@@ -404,8 +417,7 @@ async function handleExecute(req, res) {
 
   const data = normalizeResult(parsed);
 
-  // ✅ Quality Gate(리텐션/사례/구조/숫자/행동 강제)
-  const gate = qualityGateV3({
+  const gate = qualityGateV4({
     title: data.longform.title,
     script: data.longform.script,
     durationSec,
@@ -415,13 +427,12 @@ async function handleExecute(req, res) {
     return res.status(422).json({
       ok: false,
       code: "QUALITY_GATE_FAIL",
-      message: "script quality gate failed (anti-AI-slop + retention)",
+      message: "script quality gate failed (anti-AI-slop + retention v4)",
       detail: gate.reasons,
       data,
     });
   }
 
-  // ✅ 영상 단계 연결(가능하면 download_url 채움)
   const workerResult = await tryCallWorkerRender(data);
   if (!workerResult.ok) {
     console.log("[worker] render skip/fail:", workerResult.reason, workerResult.detail || "");
@@ -435,14 +446,9 @@ async function handleExecute(req, res) {
 /* =========================
  * Routes
  * ========================= */
+app.get("/", (req, res) => res.send("finishflow-live is running"));
 
-app.get("/", (req, res) => {
-  res.send("finishflow-live is running");
-});
-
-app.get("/health", (req, res) => {
-  res.json({ ok: true });
-});
+app.get("/health", (req, res) => res.json({ ok: true }));
 
 app.get("/debug/env", (req, res) => {
   res.json({
@@ -465,7 +471,6 @@ app.post("/execute", async (req, res) => {
 /* =========================
  * Listen
  * ========================= */
-
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`[finishflow-live] listening on ${PORT}`);
   console.log(`[BOOT] BUILD=${BUILD}`);
