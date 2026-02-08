@@ -484,8 +484,9 @@ async function main() {
 }
 
 // ESM에서 직접 실행될 때만 main() 호출
-const isDirectRun = process.argv[1] && import.meta.url.endsWith(process.argv[1].replace(/\\/g, "/"));
-if (isDirectRun) {
+// ====== CLI entry (always run when called by `node make.js`) ======
+if (process.argv.some((a) => a.endsWith("make.js"))) {
   main();
 }
+
 
