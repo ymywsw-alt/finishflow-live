@@ -142,10 +142,11 @@ async function generateScript(topic) {
   const data = await openaiJSON("https://api.openai.com/v1/chat/completions", {
     model: "gpt-4o-mini",
     messages: [
-      {
-        role: "system",
-        content:
-"You write Korean voiceover scripts that sound natural for middle-aged/older audiences. Use short spoken sentences. Add natural pauses. Sound like a calm YouTube narrator speaking slowly and clearly. Avoid hype."
+        {
+  role: "system",
+  content: "You write Korean voiceover scripts that sound natural for middle-aged/older audiences. Use short spoken sentences. Add natural pauses. Sound like a calm YouTube narrator speaking slowly and clearly. Avoid hype."
+},
+
       },
       {
         role: "user",
