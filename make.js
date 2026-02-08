@@ -145,7 +145,6 @@ async function generateScript(topic) {
       {
         role: "system",
         content:
-          content:
 "You write Korean voiceover scripts that sound natural for middle-aged/older audiences. Use short spoken sentences. Add natural pauses. Sound like a calm YouTube narrator speaking slowly and clearly. Avoid hype."
       },
       {
