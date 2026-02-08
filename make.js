@@ -460,4 +460,32 @@ export async function makeVideo({ topic }) {
       bgm_download_url: bgmInfo?.download_url || ""
     }
   };
+}// ====== CLI entry (so `node make.js` actually runs) ======
+async function main() {
+  try {
+    // req.json 읽기 (server.js가 먼저 써둠)
+    const reqPath = path.join(process.cwd(), "req.json");
+    const raw = fs.readFileSync(reqPath, "utf-8");
+    const req = JSON.parse(raw);
+
+    const topic = (req?.topic || "").toString().trim();
+    if (!topic) throw new Error("req.json missing topic");
+
+    // 실행
+    const result = await makeVideo({ topic });
+
+    // server.js가 잡아갈 수 있게 "한 줄 JSON"로 출력
+    console.log(JSON.stringify(result));
+    process.exit(0);
+  } catch (e) {
+    console.error(e?.message || String(e));
+    process.exit(1);
+  }
 }
+
+// ESM에서 직접 실행될 때만 main() 호출
+const isDirectRun = process.argv[1] && import.meta.url.endsWith(process.argv[1].replace(/\\/g, "/"));
+if (isDirectRun) {
+  main();
+}
+
