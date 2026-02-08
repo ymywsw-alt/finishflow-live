@@ -148,6 +148,8 @@ async function generateScript(topic, videoType = "LONG", durationSec = 720) {
 4) 오늘 할 행동 3단계
 5) 흔한 실수 3개
 6) 결론: 오늘 할 행동 1개
+전체 분량은 한국어 기준 약 8~12분 분량(최소 1,600~2,400단어)에 맞춰 충분히 자세하게 작성한다.
+각 섹션마다 구체적인 사례와 설명을 포함하여 분량을 확보한다.
 
 ${RULES}
 
