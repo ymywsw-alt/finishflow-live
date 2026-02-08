@@ -61,6 +61,10 @@ function preprocessKoreanTTS(text) {
   t = t.replace(/~/g, "에서 ");
   t = t.replace(/\bAI\b/gi, "에이아이");
   t = t.replace(/\s+/g, " ").trim();
+t = t.replace(/([.!?])\s*/g, "$1\n");                 // 문장 끝 쉼
+t = t.replace(/(^|\n)\s*(하지만|그리고|그래서|특히|결론은)\s*/g, "$1\n$2 "); // 전환어(줄 시작) 앞 쉼
+
+t = t.replace(/[,，]\s*/g, ", ");                      // 쉼표 정리
 
   // 너무 긴 문장 쪼개기: 문장부호/종결 기준
   const parts = t
