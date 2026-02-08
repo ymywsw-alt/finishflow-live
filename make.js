@@ -197,7 +197,7 @@ async function generateTTSMp3(scriptText) {
     model: "gpt-4o-mini-tts",
     voice: "alloy",
     format: "mp3",
-    speed: 0.97,
+    speed: 0.90,
     input: cleaned
   });
 
