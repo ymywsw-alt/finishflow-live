@@ -30,7 +30,7 @@ function baseSchema() {
     thumbnails: [{ text: "" }, { text: "" }, { text: "" }],
     recommended_thumbnail_index: 0,
     meta: { model: OPENAI_MODEL, build: BUILD },
-    bgm: { preset: "", duration_sec: 0, download_url: "" }, // download_url 여기 채움
+    bgm: { preset: "", duration_sec: 0, download_url: "" },
   };
 }
 
@@ -72,7 +72,6 @@ function coerceToJsonString(text) {
   const s = text.toString();
 
   const noFence = s.replace(/```json/gi, "```").replace(/```/g, "");
-
   const start = noFence.indexOf("{");
   const end = noFence.lastIndexOf("}");
   if (start >= 0 && end > start) return noFence.slice(start, end + 1);
@@ -109,42 +108,59 @@ function normalizeResult(parsed) {
 }
 
 /* =========================
- * AI Slop 방지 - Quality Gate v2
- * (출력 자체를 막아 유튜브 리스크 제거)
+ * Retention/SEO 계산(게이트 기준용)
  * ========================= */
 
-function qualityGateV2({ title, script }) {
+function requiredRetentionBeats(durationSec) {
+  // 8~12분(480~720)면 최소 4~6개, 15분(900)면 최소 7개 정도로 강제(너무 빡세지 않게)
+  const sec = Math.max(60, Number(durationSec || 900));
+  const beats = Math.floor(sec / 120); // 2분마다 최소 1번 리텐션 비트
+  return Math.max(4, Math.min(10, beats));
+}
+
+/* =========================
+ * AI Slop 방지 + Retention 게이트 v3
+ * ========================= */
+
+function qualityGateV3({ title, script, durationSec }) {
   const t = (title || "") + "\n" + (script || "");
+
+  // 기본 필수
   const hasNumber = /\d/.test(t);
-  const hasAction = /(하세요|해보세요|지금|바로|체크|멈추|줄이|늘리|기록)/.test(t);
+  const hasAction = /(하세요|해보세요|지금|바로|체크|멈추|줄이|늘리|기록|설정)/.test(t);
   const hasTarget = /(40대|50대|60대|70대|중장년|시니어|무릎|허리|혈압|당뇨|수면|치매)/.test(t);
 
-  // "사례 문장" 최소 3개 (아주 단순 휴리스틱)
-  const exampleCount =
-    (t.match(/예를 들어/g) || []).length +
-    (t.match(/사례/g) || []).length +
-    (t.match(/저희가 상담했던/g) || []).length +
-    (t.match(/많은 분들이 실제로/g) || []).length;
+  // 사례 3개를 "형식"으로 강제
+  const caseLines = (t.match(/사례\s*[1-3]\s*:/g) || []).length;
+  const has3Cases = caseLines >= 3;
 
-  // 구조 키워드 존재(훅/공감/방법/실수/행동)
+  // 구조(섹션 헤더)
   const hasStructure =
-    /(Hook|훅|공감)/i.test(t) &&
-    /(방법 1|첫 번째|1\))/i.test(t) &&
-    /(방법 2|두 번째|2\))/i.test(t) &&
-    /(방법 3|세 번째|3\))/i.test(t) &&
-    /(실수|주의)/.test(t) &&
-    /(오늘 바로|지금 할 행동|마무리)/.test(t);
+    /\[Hook\]/.test(t) &&
+    /\[공감\]/.test(t) &&
+    /\[방법 1: 무엇을\/왜\/어떻게\]/.test(t) &&
+    /\[방법 2: 무엇을\/왜\/어떻게\]/.test(t) &&
+    /\[방법 3: 무엇을\/왜\/어떻게\]/.test(t) &&
+    /\[실수 방지\]/.test(t) &&
+    /\[오늘 바로 할 행동\]/.test(t);
 
-  // AI 슬롭 대표 일반론 과다(대충 방지)
+  // Retention 비트(중간 이탈 방지 장치)
+  // 모델이 20~30초마다 새 정보를 주되, 최소한 2분마다 '리텐션 비트'를 넣게 강제
+  const beatCount = (t.match(/리텐션 비트\s*\d+\s*:/g) || []).length;
+  const needBeats = requiredRetentionBeats(durationSec);
+  const hasBeats = beatCount >= needBeats;
+
+  // 슬롭 일반론 과다 방지
   const vagueCount = (t.match(/(중요합니다|도움이 됩니다|좋습니다|필요합니다)/g) || []).length;
 
   const ok =
     hasNumber &&
     hasAction &&
     hasTarget &&
-    exampleCount >= 3 &&
     hasStructure &&
-    vagueCount <= 10;
+    has3Cases &&
+    hasBeats &&
+    vagueCount <= 12;
 
   return {
     ok,
@@ -152,35 +168,42 @@ function qualityGateV2({ title, script }) {
       hasNumber,
       hasAction,
       hasTarget,
-      exampleCount,
       hasStructure,
+      caseLines,
+      needBeats,
+      beatCount,
       vagueCount,
     },
   };
 }
 
 /* =========================
- * Prompt (유튜브 생존형 v2)
+ * Prompt (유튜브 생존형 v3: Retention + SEO/CTR 내장)
  * ========================= */
 
 function estimateWordTarget(durationSec) {
-  // 보수적으로 135 wpm 기준 (시니어 차분 톤)
-  const wpm = 135;
+  const wpm = 135; // 시니어 차분 톤
   const minutes = Math.max(1, Number(durationSec || 900) / 60);
   return Math.round(wpm * minutes);
 }
 
 function buildSystemPrompt({ durationSec }) {
   const wordTarget = estimateWordTarget(durationSec);
+  const needBeats = requiredRetentionBeats(durationSec);
 
   return `
 Return ONLY valid JSON.
 No explanation.
 No markdown.
 
-당신은 '시니어 대상 유튜브 영상' 전문 작가다.
-AI 티(일반론 반복, 의미없는 문장, 빈약한 정보)를 절대 내지 마라.
-실제 도움이 되는 "실천형 정보"만 작성한다.
+당신은 2026년 기준 '시니어 유튜브'에서 살아남는 스크립트 작가다.
+AI 슬롭(일반론 반복, 빈약한 정보, 뻔한 문장)처럼 보이면 실패다.
+목표는 "시청 유지율 50% 이상"을 노리는 구성이다.
+
+[유튜브 상위 노출 확률을 높이는 3요소(코드 강제)]
+1) CTR: 제목/썸네일이 "누가/무슨 문제/얼마나/결과"를 즉시 말한다(과장·공포 금지).
+2) Retention: 중간 이탈 방지 장치를 주기적으로 넣는다(오픈루프/다음에 얻는 것/즉시 적용).
+3) Satisfaction: 실천 가능한 체크리스트/숫자/주의사항/오늘 행동 1개로 끝낸다.
 
 [영상 목적]
 - 실제 도움이 되는 정보 제공
@@ -189,25 +212,31 @@ AI 티(일반론 반복, 의미없는 문장, 빈약한 정보)를 절대 내지
 [구조 규칙]
 1) 시작 15초 Hook: 문제 상황 → 해결 가능성 → 오늘 얻을 결과
 2) 공감 구간: 많은 사람들이 겪는 상황을 구체적으로
-3) 핵심 정보: 방법 3개 제시
-   - 각 방법은 반드시 "무엇을 → 왜 → 어떻게" 순서로 작성
-4) 실수 방지 구간: 사람들이 흔히 하는 실수/주의점
-5) 행동 지시로 마무리: 오늘 바로 할 행동 1개
+3) 핵심 정보: 방법 3개
+   - 각 방법은 반드시 "무엇을 → 왜 → 어떻게" 순서
+4) 실수 방지: 흔한 실수/주의점
+5) 행동 지시: 오늘 바로 할 행동 1개
 
-[작성 규칙]
+[작성 규칙(강제)]
 - 20~30초마다 새로운 정보(새 팁/새 숫자/새 체크포인트)가 나오게 구성
-- 사례 문장 최소 3개 포함(예: "예를 들어..." / "사례로...")
 - 숫자 반드시 포함(시간/횟수/개수 등)
 - 행동 지시 반드시 포함
-- 설명이 아니라 실천 중심(체크리스트/단계/루틴)
+- "사례 1/2/3"을 아래 형식으로 정확히 3줄 포함:
+  사례 1: ...
+  사례 2: ...
+  사례 3: ...
+- Retention 장치(중간 이탈 방지) 최소 ${needBeats}개를 아래 형식으로 포함:
+  리텐션 비트 1: ...
+  리텐션 비트 2: ...
+  (각 비트는 '다음에 얻는 것/지금 체크/놓치면 손해' 중 하나를 포함)
 
 [톤]
 - 차분하고 신뢰감
 - 쉬운 표현
 
-[길이 규칙]
-- 롱폼은 말로 읽었을 때 약 ${durationSec}초를 목표로 한다.
-- 최소 목표 분량: 약 ${wordTarget} 단어 수준(짧게 쓰지 마라).
+[길이]
+- 롱폼은 말로 읽었을 때 약 ${durationSec}초 목표
+- 최소 목표 분량: 약 ${wordTarget} 단어 수준(짧게 쓰지 마라)
 
 Schema:
 {
@@ -225,7 +254,7 @@ Schema:
   "recommended_thumbnail_index": 0
 }
 
-규칙 준수용 섹션 헤더를 script에 명시해라:
+롱폼 script는 아래 섹션 헤더를 반드시 포함:
 [Hook]
 [공감]
 [방법 1: 무엇을/왜/어떻게]
@@ -239,13 +268,20 @@ Schema:
 
 function buildUserPrompt({ topic, topicTone }) {
   const safeTopic = topic || "시니어 건강 정보";
+
   return `
 주제: ${safeTopic}
 톤: ${topicTone || "CALM"}
 
+[제목/썸네일 규칙(CTR)]
+- 제목: 검색 의도형(문제+대상+숫자+결과)로 작성. 예: "60대 무릎통증, 3분 루틴으로 30% 줄이는 법"
+- 썸네일 문구 3개: 12~18자 내외로 간결하게. 과장/공포조장 금지(신뢰 우선).
+
+[숏폼 규칙]
+- 30~50초 분량
+- 1문장 훅 + 3스텝(숫자 포함) + 1문장 결론(행동 지시)
+
 반드시 한국어.
-숏폼 3개는 30~50초 분량으로, 1문장 훅 + 3스텝 + 1문장 결론.
-썸네일 문구 3개는 클릭 유도형이되 과장/공포 조장 금지(신뢰 우선).
 JSON만 출력.
 `.trim();
 }
@@ -263,7 +299,7 @@ async function callOpenAI({ topic, topicTone, durationSec }) {
       { role: "system", content: buildSystemPrompt({ durationSec }) },
       { role: "user", content: buildUserPrompt({ topic, topicTone }) },
     ],
-    temperature: 0.6, // 신뢰/일관성 우선
+    temperature: 0.6,
   };
 
   const r = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -285,8 +321,6 @@ async function callOpenAI({ topic, topicTone, durationSec }) {
 
 /* =========================
  * Worker Call (영상 단계 연결)
- * - WORKER_URL이 HTTP 엔드포인트(/render)를 제공할 때 download_url 채움
- * - 실패해도 텍스트 결과는 반환(운영 안정성)
  * ========================= */
 
 async function tryCallWorkerRender(data) {
@@ -312,7 +346,9 @@ async function tryCallWorkerRender(data) {
 
     const text = await r.text();
     let j = null;
-    try { j = JSON.parse(text); } catch (_) {}
+    try {
+      j = JSON.parse(text);
+    } catch (_) {}
 
     if (!r.ok) {
       return { ok: false, reason: "WORKER_HTTP_" + r.status, detail: text.slice(0, 500) };
@@ -327,7 +363,11 @@ async function tryCallWorkerRender(data) {
 
     return { ok: false, reason: "NO_DOWNLOAD_URL", detail: text.slice(0, 500) };
   } catch (e) {
-    return { ok: false, reason: e?.name === "AbortError" ? "WORKER_TIMEOUT" : "WORKER_FETCH_FAIL", detail: String(e) };
+    return {
+      ok: false,
+      reason: e?.name === "AbortError" ? "WORKER_TIMEOUT" : "WORKER_FETCH_FAIL",
+      detail: String(e),
+    };
   } finally {
     clearTimeout(timeout);
   }
@@ -364,13 +404,18 @@ async function handleExecute(req, res) {
 
   const data = normalizeResult(parsed);
 
-  // ✅ AI Slop 방지 게이트(롱폼 기준)
-  const gate = qualityGateV2({ title: data.longform.title, script: data.longform.script });
+  // ✅ Quality Gate(리텐션/사례/구조/숫자/행동 강제)
+  const gate = qualityGateV3({
+    title: data.longform.title,
+    script: data.longform.script,
+    durationSec,
+  });
+
   if (!gate.ok) {
     return res.status(422).json({
       ok: false,
       code: "QUALITY_GATE_FAIL",
-      message: "script quality gate failed (anti-AI-slop)",
+      message: "script quality gate failed (anti-AI-slop + retention)",
       detail: gate.reasons,
       data,
     });
@@ -379,7 +424,6 @@ async function handleExecute(req, res) {
   // ✅ 영상 단계 연결(가능하면 download_url 채움)
   const workerResult = await tryCallWorkerRender(data);
   if (!workerResult.ok) {
-    // 운영상 실패해도 텍스트 결과는 반환. 로그로만 남김.
     console.log("[worker] render skip/fail:", workerResult.reason, workerResult.detail || "");
   } else {
     console.log("[worker] render ok:", workerResult.download_url);
