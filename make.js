@@ -114,25 +114,76 @@ async function openaiBinary(url, body) {
 }
 
 // ====== Script generation (spoken style) ======
-async function generateScript(topic) {
+async function generateScript(topic, videoType = "LONG", durationSec = 720) {
+
+  const RULES = `
+[말하기용 대본 규칙 - 절대 준수]
+- 문장은 말하듯이 짧게 끊어라.
+- 한 문장은 최대 12단어를 넘기지 마라.
+- 줄바꿈을 적극 사용하라.
+- 설명은 짧은 문장 2개 + 보충 설명 1개 리듬으로 작성하라.
+- 접속사(하지만/그리고/그래서/특히/결론은) 앞뒤는 반드시 끊어라.
+- 강조는 쉼과 줄바꿈으로만 표현한다.
+- 숫자나 단계는 반드시 줄바꿈으로 구분한다.
+- 결과는 나레이션 원고만 출력한다.
+`;
+
+  const longPrompt = `
+당신은 시니어 대상 유튜브 나레이션 작가다.
+타겟은 50~80대이며 차분하고 단정한 톤이다.
+
+[콘텐츠 목표]
+- 불안 해소
+- 실용 정보 제공
+- 오늘 할 행동 1개 제시
+
+[구성]
+1) 문제 제시
+2) 공감
+3) 핵심 원리 3개
+4) 오늘 할 행동 3단계
+5) 흔한 실수 3개
+6) 결론: 오늘 할 행동 1개
+
+${RULES}
+
+주제: ${topic}
+분량: 약 ${durationSec}초 분량
+`.trim();
+
+  const shortPrompt = `
+당신은 시니어 대상 숏폼 나레이션 작가다.
+
+[구성]
+- 질문 1줄
+- 핵심 답 2~3줄
+- 오늘 행동 1줄
+
+${RULES}
+
+주제: ${topic}
+`.trim();
+
+  const prompt = (videoType === "SHORT" ? shortPrompt : longPrompt);
+
   const data = await openaiJSON("https://api.openai.com/v1/chat/completions", {
     model: "gpt-4o-mini",
+    temperature: 0.6,
     messages: [
       {
         role: "system",
-        content:
-          "You write Korean voiceover scripts that sound natural for middle-aged/older audiences. Use short spoken sentences. Add natural pauses. Sound like a calm YouTube narrator speaking slowly and clearly. Avoid hype."
+        content: "You write Korean voiceover scripts for middle-aged/older audiences."
       },
       {
         role: "user",
-        content: `주제: "${topic}"\n\n요구사항:\n- 45~60초 분량\n- 문장 짧게\n- 어려운 용어 금지\n- 마지막은 행동 1가지로 끝내기\n- 말하듯이 쓰기 (설명문체 금지)\n\n스크립트만 출력`
+        content: prompt
       }
-    ],
-    temperature: 0.4
+    ]
   });
 
   const text = (data?.choices?.[0]?.message?.content || "").trim();
   if (!text) throw new Error("Empty script from OpenAI");
+
   return text;
 }
 
