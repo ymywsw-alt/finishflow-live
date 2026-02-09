@@ -161,19 +161,21 @@ const shortPrompt = `
 
 
   // ✅ 핵심: prompt 스코프 복구 (prompt is not defined 방지)
-  const prompt = videoType === "SHORT" ? shortPrompt : longPrompt;
+  const SYSTEM = "You write concise Korean voiceover scripts for ages 50-80. Tone: calm, clear. No markdown symbols (* # [ ]).";
 
-  async function callResponses(userText) {
+async function callResponses(userText) {
   const d = await openaiJSON("https://api.openai.com/v1/responses", {
-  model: "gpt-4.1-mini",
-  max_output_tokens: 6000,
-  input: `System:\n${userText}`
-    
-});
+    model: "gpt-4.1-mini",
+    max_output_tokens: 1200,
+    input: [
+      { role: "system", content: SYSTEM },
+      { role: "user", content: userText }
+    ]
+  });
 
   const out =
     (d.output_text || "").trim() ||
-    (d.output?.[0]?.content?.find(c => c.type === "output_text")?.text || "").trim();
+    (d.output?.[0]?.content?.find((c) => c.type === "output_text")?.text || "").trim();
 
   return out;
 }
