@@ -127,38 +127,21 @@ async function openaiBinary(url, body) {
 // ====== Script generation (spoken style) ======
 async function generateScript(topic, videoType = "LONG", durationSec = 720) {
   console.log("SCRIPT VERSION B");
-  const RULES = `
-규칙:
-- 한국어 말투, 차분하고 단정.
-- 줄바꿈 자주.
-- 마크다운 기호 금지(**, #, [, ]).
-- 마지막에 오늘 할 행동 1개.
-`.trim();
-
+ 
 const longPrompt = `
-당신은 50~80대 대상 한국어 유튜브 나레이션 작가다.
-톤은 차분하고 단정한 구어체.
-마크다운/특수기호 없이 일반 문장으로만 쓴다.
-
 주제: ${topic}
 
-8~12분 분량의 '완성 대본'을 작성하라.
-구성은: 인트로 → 핵심 설명 → 사례 2개 → 체크리스트 5개 → 결론(오늘 할 행동 1개).
-`.trim();
-
+50~80대 시니어 대상의 차분한 설명 형식으로
+이해하기 쉬운 영상 스크립트를 작성한다.
+분량은 약 ${durationSec}초 기준.
+`;
 
 const shortPrompt = `
 주제: ${topic}
 
-3줄로 작성:
-1. 정의
-2. 중요한 이유
-3. 오늘 할 행동
-
-톤: 차분하고 단정.
-마크다운 기호 사용 금지.
-`.trim();
-
+30~50초 길이의 짧고 이해하기 쉬운 설명을 작성한다.
+핵심 내용만 간결하게 전달한다.
+`;
 
   // ✅ 핵심: prompt 스코프 복구 (prompt is not defined 방지)
   const SYSTEM = "You write concise Korean voiceover scripts for ages 50-80. Tone: calm, clear. No markdown symbols (* # [ ]).";
@@ -166,7 +149,7 @@ const shortPrompt = `
 async function callResponses(userText) {
   const d = await openaiJSON("https://api.openai.com/v1/responses", {
     model: "gpt-4.1-mini",
-    max_output_tokens: 1200,
+    max_output_tokens: 900,
     input: [
       { role: "system", content: SYSTEM },
       { role: "user", content: userText }
