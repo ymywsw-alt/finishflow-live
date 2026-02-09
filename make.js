@@ -199,26 +199,23 @@ ${RULES}
 
   const prompt = (videoType === "SHORT" ? shortPrompt : longPrompt);
 
-  const data = await openaiJSON("https://api.openai.com/v1/chat/completions", {
-    model: "gpt-4o-mini",
-    temperature: 0.6,
-    max_tokens: 2500,
-    messages: [
-      {
-        role: "system",
-        content: "You write Korean voiceover scripts for middle-aged/older audiences."
-      },
-      {
-        role: "user",
-        content: prompt
-      }
-    ]
-  });
+  const data = await openaiJSON("https://api.openai.com/v1/responses", {
+  model: "gpt-4o-mini",
+  max_output_tokens: 3200,
+  input: [
+    { role: "system", content: "You write Korean voiceover scripts that sound natural for middle-aged and older audiences." },
+    { role: "user", content: prompt }
+  ]
+});
 
-  const text = (data?.choices?.[0]?.message?.content || "").trim();
-  if (!text) throw new Error("Empty script from OpenAI");
+const text =
+  (data.output_text || "").trim() ||
+  (data.output?.[0]?.content?.find(c => c.type === "output_text")?.text || "").trim();
 
-  return text;
+
+if (!text) throw new Error("Empty script from OpenAI");
+return text;
+
 }
 
 // ====== TTS (mp3) ======
