@@ -202,7 +202,7 @@ let text = await callResponses(firstPrompt);
     return (s || "").replace(/\s+/g, "").length;
   }
 
-  for (let i = 0; i < maxExtend; i++) {
+ /* for (let i = 0; i < maxExtend; i++) {
     if (charsNoSpace(text) >= minCharsNoSpace) break;
 
     const extendPrompt = `
@@ -223,7 +223,7 @@ ${text}
     const add = await callResponses(extendPrompt);
     if (!add) break;
     text = (text + "\n" + add).trim();
-  }
+  } */
 
   if (!text) throw new Error("Empty script from OpenAI");
   return text;
