@@ -136,32 +136,32 @@ async function generateScript(topic, videoType = "LONG", durationSec = 720) {
 `.trim();
 
   const longPrompt = `
-당신은 50~80대 대상 한국어 유튜브 나레이션 작가다.
-톤은 차분하고 단정하다.
+50~80대 대상 한국어 유튜브 나레이션.
 
 주제: ${topic}
 
 구성:
-인트로 → 설명 → 사례 → 체크리스트 → 결론 순서로 작성하라.
+1. 인트로
+2. 핵심 설명
+3. 사례 2개
+4. 체크리스트 5개
+5. 오늘 할 행동 1개
 
-분량은 8~12분이 되도록 충분히 설명하되 반복은 피하라.
-
-${RULES}
+톤은 차분하고 단정.
+마크다운 기호 사용 금지.
 `.trim();
 
 
   const shortPrompt = `
-당신은 시니어 대상 숏폼 나레이션 작가다.
-
-[구성]
-- 질문 1줄
-- 핵심 답 2~3줄
-- 오늘 행동 1줄
-
-${RULES}
+시니어 대상 짧은 나레이션.
 
 주제: ${topic}
+
+구성:
+핵심 2줄
+오늘 행동 1줄
 `.trim();
+
 
   // ✅ 핵심: prompt 스코프 복구 (prompt is not defined 방지)
   const prompt = videoType === "SHORT" ? shortPrompt : longPrompt;
