@@ -202,6 +202,7 @@ ${RULES}
   const data = await openaiJSON("https://api.openai.com/v1/chat/completions", {
     model: "gpt-4o-mini",
     temperature: 0.6,
+    max_tokens: 2500,
     messages: [
       {
         role: "system",
