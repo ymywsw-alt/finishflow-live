@@ -95,7 +95,7 @@ async function openaiJSON(url, body) {
 
   if (!r.ok) {
     const text = await r.text().catch(() => "");
-    throw new Error(`OpenAI error ${r.status}: ${text.slice(0, 500)}`);
+    throw new Error(`OpenAI error ${r.status}: ${text.slice(0, 2000)}`);
   }
   return r.json();
 }
@@ -115,7 +115,7 @@ async function openaiBinary(url, body) {
 
   if (!r.ok) {
     const text = await r.text().catch(() => "");
-    throw new Error(`OpenAI error ${r.status}: ${text.slice(0, 500)}`);
+    throw new Error(`OpenAI error ${r.status}: ${text.slice(0, 2000)}`);
   }
   const ab = await r.arrayBuffer();
   return Buffer.from(ab);
