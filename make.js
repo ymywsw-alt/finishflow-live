@@ -190,6 +190,7 @@ const firstPrompt = `
 마지막에 오늘 할 행동 1개를 제시하라.
 `.trim();
 
+  console.log("[LEN] firstPrompt chars:", firstPrompt.length);
 let text = await callResponses(firstPrompt);
 
 
