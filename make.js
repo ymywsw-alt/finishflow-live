@@ -149,8 +149,8 @@ async function generateScript(topic, videoType = "LONG", durationSec = 720) {
 
 톤은 차분하고 단정.
 마크다운 기호 사용 금지.
+분량은 4~6분 정도로만 작성하라.
 `.trim();
-
 
   const shortPrompt = `
 시니어 대상 짧은 나레이션.
