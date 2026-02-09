@@ -208,7 +208,7 @@ ${RULES}
 
   async function callResponses(userText) {
   const d = await openaiJSON("https://api.openai.com/v1/responses", {
-    model: "gpt-4o-mini",
+    model: "gpt-4.1-mini",
     max_output_tokens: 6000,
     input: userText
   });
