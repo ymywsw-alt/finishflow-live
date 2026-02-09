@@ -144,7 +144,7 @@ const shortPrompt = `
 `;
 
   // ✅ 핵심: prompt 스코프 복구 (prompt is not defined 방지)
-  const SYSTEM = "You write concise Korean voiceover scripts for ages 50-80. Tone: calm, clear. No markdown symbols (* # [ ]).";
+  const SYSTEM = `Return JSON only.`;
 
 async function callResponses(userText) {
   const d = await openaiJSON("https://api.openai.com/v1/responses", {
