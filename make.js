@@ -162,9 +162,6 @@ ${RULES}
   // ✅ 핵심: prompt 스코프 복구 (prompt is not defined 방지)
   const prompt = videoType === "SHORT" ? shortPrompt : longPrompt;
 
-  const SYSTEM =
-    "You write Korean voiceover scripts that sound natural for middle-aged and older audiences.";
-
   async function callResponses(userText) {
   const d = await openaiJSON("https://api.openai.com/v1/responses", {
     model: "gpt-4.1-mini",
