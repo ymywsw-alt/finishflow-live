@@ -207,22 +207,18 @@ ${RULES}
     "You write Korean voiceover scripts that sound natural for middle-aged and older audiences.";
 
   async function callResponses(userText) {
-    const d = await openaiJSON("https://api.openai.com/v1/responses", {
-      model: "gpt-4o-mini",
-      max_output_tokens: 6000,
-      input: [
-        { role: "system", content: SYSTEM },
-        { role: "user", content: userText }
-      ]
-    });
+  const d = await openaiJSON("https://api.openai.com/v1/responses", {
+    model: "gpt-4o-mini",
+    max_output_tokens: 6000,
+    input: userText
+  });
 
-    const out =
-      (d.output_text || "").trim() ||
-      (d.output?.[0]?.content?.find((c) => c.type === "output_text")?.text || "")
-        .trim();
+  const out =
+    (d.output_text || "").trim() ||
+    (d.output?.[0]?.content?.find(c => c.type === "output_text")?.text || "").trim();
 
-    return out;
-  }
+  return out;
+}
 
   // 1) first draft
   let text = await callResponses(prompt);
