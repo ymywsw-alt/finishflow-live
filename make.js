@@ -1,4 +1,7 @@
-// finishflow-live / make.js  (FULL REPLACE)
+// finishflow-live / make.js (FULL REPLACE)
+
+console.log("MAKEJS_VERSION_PARTS_6_CHECK");
+
 // - ES Module style (works on Node 18+; may show a harmless warning if package.json lacks "type":"module")
 // - Reads ./req.json
 // - Generates script -> TTS mp3 -> ffprobe duration -> ffmpeg mp4 (+ optional AudioFlow BGM mix)
