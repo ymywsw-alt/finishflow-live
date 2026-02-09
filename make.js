@@ -124,14 +124,11 @@ async function openaiBinary(url, body) {
 // ====== Script generation (spoken style) ======
 async function generateScript(topic, videoType = "LONG", durationSec = 720) {
   const RULES = `
-[규칙]
-- 말하듯 짧게.
-- 한 문장 20단어 이하.
+규칙:
+- 한국어 말투, 차분하고 단정.
 - 줄바꿈 자주.
-- 마크다운 기호(**, #, [, ]) 금지.
-- 섹션은 문장으로만 표시.
-- 체크리스트와 단계는 줄바꿈으로 구분.
-- 마지막에 오늘 할 행동 1개 제시.
+- 마크다운 기호 금지(**, #, [, ]).
+- 마지막에 오늘 할 행동 1개.
 `.trim();
 
   const longPrompt = `
@@ -141,12 +138,7 @@ async function generateScript(topic, videoType = "LONG", durationSec = 720) {
 주제: ${topic}
 
 구성:
-1) 인트로: 공감 2문장 + 결론 예고
-2) 핵심 설명: 중요한 내용 5가지
-3) 사례 3개
-4) 체크리스트 7개
-5) 주의사항 5개
-6) 결론 + 오늘 할 행동 1개
+인트로 → 설명 → 사례 → 체크리스트 → 결론 순서로 작성하라.
 
 분량은 8~12분이 되도록 충분히 설명하되 반복은 피하라.
 
