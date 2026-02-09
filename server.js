@@ -99,36 +99,48 @@ app.post("/make", async (req, res) => {
   const videoType = typeof req.body?.videoType === "string" ? req.body.videoType : "LONG";
   const topicTone = typeof req.body?.topicTone === "string" ? req.body.topicTone : "CALM";
   const durationSec =
-    typeof req.body?.durationSec === "number" && Number.isFinite(req.body.durationSec) ? req.body.durationSec : 900;
+    typeof req.body?.durationSec === "number" && Number.isFinite(req.body.durationSec)
+      ? req.body.durationSec
+      : 900;
 
   if (!topic) return res.status(400).json({ ok: false, error: "Missing topic" });
 
   try {
     isRunning = true;
+
+    // req.json 생성
     writeReqJson({ topic, videoType, topicTone, durationSec });
 
-    const r = await runMakeJs();
+    // make.js 실행
+    const r = await runMakeJS();
 
-    // ✅ make.js 결과에서 video_path만 사용 (make.js의 download_url은 무시)
+    // ✅ download_url 최우선 채택 (make.js가 만든 url)
     let serverDownloadUrl = null;
-    if (r?.parsed?.video_path) {
+
+    if (r?.download_url && typeof r.download_url === "string") {
+      serverDownloadUrl = r.download_url;
+    }
+
+    // ✅ fallback: video_path 기반 토큰 다운로드
+    if (!serverDownloadUrl && r?.parsed?.video_path) {
       const token = issueToken(r.parsed.video_path);
       serverDownloadUrl = `/download?token=${token}`;
     }
 
     return res.json({
-      ok: r.ok,
+      ok: !!r?.ok,
       route: "/make",
+      download_url: serverDownloadUrl, // ✅ 최상위 고정
       result: {
-        code: r.code,
-        parsed: r.parsed,
-        // ✅ 여기! 이 값만 써야 함
-        download_url: serverDownloadUrl
+        code: r?.code ?? null,
+        parsed: r?.parsed ?? null,
+        stdout: r?.stdout ?? null,
+        stderr: r?.stderr ?? null,
+        error: r?.error ?? null,
       },
-      logs: { stdout: r.stdout, stderr: r.stderr }
     });
   } catch (e) {
-    return res.status(500).json({ ok: false, error: e.message || String(e) });
+    return res.status(500).json({ ok: false, error: e?.message || String(e) });
   } finally {
     isRunning = false;
   }
