@@ -112,7 +112,7 @@ app.post("/make", async (req, res) => {
     writeReqJson({ topic, videoType, topicTone, durationSec });
 
     // make.js 실행
-    const r = await runMakeJS();
+    const r = await runMakeJs();
 
     // ✅ download_url 최우선 채택 (make.js가 만든 url)
     let serverDownloadUrl = null;
