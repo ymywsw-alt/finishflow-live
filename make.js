@@ -178,21 +178,32 @@ ${RULES}
 }
 
   // 1) first draft
-const firstPrompt = `
+// 1) first draft (split into parts to avoid input token limit)
+const parts = [];
+
+for (let part = 1; part <= 4; part++) {
+  const partPrompt = `
 당신은 50~80대 대상 한국어 유튜브 나레이션 작가다.
 톤은 차분하고 단정하다.
 마크다운 기호(**, #, [, ])는 쓰지 마라.
 
 주제: ${topic}
 
-3~4분 분량만 먼저 작성하라.
-핵심 설명과 사례 1~2개만 포함하라.
-마지막에 오늘 할 행동 1개를 제시하라.
+아래는 8~12분 영상 대본의 ${part}/4 파트이다.
+파트별 요구:
+- 1/4: 인트로 + 핵심 개요 + 오늘 결론 예고
+- 2/4: 핵심 설명(쉬운 말) + 사례 2개
+- 3/4: 추가 사례 2개 + 체크리스트 7개
+- 4/4: 주의사항 5개 + 7일 루틴 + 결론 + 오늘 할 행동 1개
+
+지금 파트(${part}/4)만 출력하라.
 `.trim();
 
-  console.log("[LEN] firstPrompt chars:", firstPrompt.length);
-let text = await callResponses(firstPrompt);
+  const out = await callResponses(partPrompt);
+  if (out) parts.push(out.trim());
+}
 
+let text = parts.join("\n\n").trim();
 
   // 2) if too short, auto-extend 1~2 times
   const minCharsNoSpace = 14000; // 8~12분 목표(공백 제외) 안전 기준
