@@ -184,7 +184,7 @@ ${RULES}
 // 1) first draft (split into parts to avoid input token limit)
 const parts = [];
 
-for (let part = 1; part <= 4; part++) {
+for (let part = 1; part <= 7; part++) {
   const partPrompt = `
 당신은 50~80대 대상 한국어 유튜브 나레이션 작가다.
 톤은 차분하고 단정하다.
