@@ -178,7 +178,15 @@ ${RULES}
 }
 
   // 1) first draft
-  let text = await callResponses(prompt);
+ const firstPrompt = `
+다음 주제로 3~4분 분량만 먼저 작성하세요.
+너무 길게 쓰지 말고 핵심 설명과 사례 1~2개만 포함하세요.
+
+${prompt}
+`.trim();
+
+let text = await callResponses(firstPrompt);
+
 
   // 2) if too short, auto-extend 1~2 times
   const minCharsNoSpace = 14000; // 8~12분 목표(공백 제외) 안전 기준
