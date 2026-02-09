@@ -61,10 +61,14 @@ function preprocessKoreanTTS(text) {
   t = t.replace(/~/g, "에서 ");
   t = t.replace(/\bAI\b/gi, "에이아이");
   t = t.replace(/\s+/g, " ").trim();
-t = t.replace(/([.!?])\s*/g, "$1\n");                 // 문장 끝 쉼
-t = t.replace(/(^|\n)\s*(하지만|그리고|그래서|특히|결론은)\s*/g, "$1\n$2 "); // 전환어(줄 시작) 앞 쉼
 
-t = t.replace(/[,，]\s*/g, ", ");                      // 쉼표 정리
+  t = t.replace(/([.!?])\s*/g, "$1\n"); // 문장 끝 쉼
+  t = t.replace(
+    /(^|\n)\s*(하지만|그리고|그래서|특히|결론은)\s*/g,
+    "$1\n$2 "
+  ); // 전환어(줄 시작) 앞 쉼
+
+  t = t.replace(/[,，]\s*/g, ", "); // 쉼표 정리
 
   // 너무 긴 문장 쪼개기: 문장부호/종결 기준
   const parts = t
@@ -119,7 +123,6 @@ async function openaiBinary(url, body) {
 
 // ====== Script generation (spoken style) ======
 async function generateScript(topic, videoType = "LONG", durationSec = 720) {
-
   const RULES = `
 [말하기용 대본 규칙 - 절대 준수]
 - 문장은 말하듯이 짧게 끊어라.
@@ -130,7 +133,7 @@ async function generateScript(topic, videoType = "LONG", durationSec = 720) {
 - 강조는 쉼과 줄바꿈으로만 표현한다.
 - 숫자나 단계는 반드시 줄바꿈으로 구분한다.
 - 결과는 나레이션 원고만 출력한다.
-`;
+`.trim();
 
   const longPrompt = `
 당신은 시니어 대상 유튜브 나레이션 작가다.
@@ -197,40 +200,45 @@ ${RULES}
 주제: ${topic}
 `.trim();
 
-  const SYSTEM = "You write Korean voiceover scripts that sound natural for middle-aged and older audiences.";
+  // ✅ 핵심: prompt 스코프 복구 (prompt is not defined 방지)
+  const prompt = videoType === "SHORT" ? shortPrompt : longPrompt;
 
-async function callResponses(userText) {
-  const d = await openaiJSON("https://api.openai.com/v1/responses", {
-    model: "gpt-4o-mini",
-    max_output_tokens: 6000,
-    input: [
-      { role: "system", content: SYSTEM },
-      { role: "user", content: userText }
-    ]
-  });
+  const SYSTEM =
+    "You write Korean voiceover scripts that sound natural for middle-aged and older audiences.";
 
-  const out =
-    (d.output_text || "").trim() ||
-    (d.output?.[0]?.content?.find(c => c.type === "output_text")?.text || "").trim();
+  async function callResponses(userText) {
+    const d = await openaiJSON("https://api.openai.com/v1/responses", {
+      model: "gpt-4o-mini",
+      max_output_tokens: 6000,
+      input: [
+        { role: "system", content: SYSTEM },
+        { role: "user", content: userText }
+      ]
+    });
 
-  return out;
-}
+    const out =
+      (d.output_text || "").trim() ||
+      (d.output?.[0]?.content?.find((c) => c.type === "output_text")?.text || "")
+        .trim();
 
-// 1) first draft
-let text = await callResponses(prompt);
+    return out;
+  }
 
-// 2) if too short, auto-extend 1~2 times
-const minCharsNoSpace = 14000; // 8~12분 목표(공백 제외) 안전 기준
-const maxExtend = 2;
+  // 1) first draft
+  let text = await callResponses(prompt);
 
-function charsNoSpace(s) {
-  return (s || "").replace(/\s+/g, "").length;
-}
+  // 2) if too short, auto-extend 1~2 times
+  const minCharsNoSpace = 14000; // 8~12분 목표(공백 제외) 안전 기준
+  const maxExtend = 2;
 
-for (let i = 0; i < maxExtend; i++) {
-  if (charsNoSpace(text) >= minCharsNoSpace) break;
+  function charsNoSpace(s) {
+    return (s || "").replace(/\s+/g, "").length;
+  }
 
-  const extendPrompt = `
+  for (let i = 0; i < maxExtend; i++) {
+    if (charsNoSpace(text) >= minCharsNoSpace) break;
+
+    const extendPrompt = `
 지금 대본이 너무 짧습니다. 아래 대본을 "그대로 이어서" 확장하세요.
 조건:
 - 같은 톤(차분/단정/시니어 대상)을 유지
@@ -245,13 +253,13 @@ ${text}
 [이어서 확장]
 `.trim();
 
-  const add = await callResponses(extendPrompt);
-  if (!add) break;
-  text = (text + "\n" + add).trim();
-}
+    const add = await callResponses(extendPrompt);
+    if (!add) break;
+    text = (text + "\n" + add).trim();
+  }
 
-if (!text) throw new Error("Empty script from OpenAI");
-return text;
+  if (!text) throw new Error("Empty script from OpenAI");
+  return text;
 }
 
 // ====== TTS (mp3) ======
@@ -264,7 +272,7 @@ async function generateTTSMp3(scriptText) {
     model: "gpt-4o-mini-tts",
     voice: "alloy",
     format: "mp3",
-    speed: 0.90,
+    speed: 0.9,
     input: cleaned
   });
 
