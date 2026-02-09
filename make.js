@@ -123,6 +123,7 @@ async function openaiBinary(url, body) {
 
 // ====== Script generation (spoken style) ======
 async function generateScript(topic, videoType = "LONG", durationSec = 720) {
+  console.log("SCRIPT VERSION B");
   const RULES = `
 규칙:
 - 한국어 말투, 차분하고 단정.
