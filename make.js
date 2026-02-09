@@ -212,7 +212,6 @@ const text =
   (data.output_text || "").trim() ||
   (data.output?.[0]?.content?.find(c => c.type === "output_text")?.text || "").trim();
 
-
 if (!text) throw new Error("Empty script from OpenAI");
 return text;
 
