@@ -178,11 +178,16 @@ ${RULES}
 }
 
   // 1) first draft
- const firstPrompt = `
-다음 주제로 3~4분 분량만 먼저 작성하세요.
-너무 길게 쓰지 말고 핵심 설명과 사례 1~2개만 포함하세요.
+const firstPrompt = `
+당신은 50~80대 대상 한국어 유튜브 나레이션 작가다.
+톤은 차분하고 단정하다.
+마크다운 기호(**, #, [, ])는 쓰지 마라.
 
-${prompt}
+주제: ${topic}
+
+3~4분 분량만 먼저 작성하라.
+핵심 설명과 사례 1~2개만 포함하라.
+마지막에 오늘 할 행동 1개를 제시하라.
 `.trim();
 
 let text = await callResponses(firstPrompt);
