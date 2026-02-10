@@ -242,7 +242,7 @@ async function makeVideo({ id, ttsPath, outDir, durationSec }) {
   const ffArgs = [
     "-y",
     "-loop", "1",
-"-i", "bg.jpg",
+"-i", "/app/bg.jpg",
 "-t", `${safeDur}`,
     "-i", ttsPath,
     "-c:v", "libx264",
