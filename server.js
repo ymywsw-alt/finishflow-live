@@ -46,29 +46,27 @@ app.post("/make", (req, res) => {
       // stdout에 로그가 섞여도 마지막 JSON만 파싱
       const s = String(stdout || "").trim();
 
-      const lastOpen = s.lastIndexOf("{");
-      if (lastOpen === -1) {
-        return res.status(200).json({
-          ok: false,
-          error: "no JSON found in make.js stdout",
-          stdout: s,
-        });
-      }
+let picked = null;
 
-      const candidate = s.slice(lastOpen);
+for (let i = 0; i < s.length; i++) {
+  if (s[i] !== "{") continue;
 
-      try {
-        const parsed = JSON.parse(candidate);
-        return res.status(200).json(parsed);
-      } catch (e) {
-        return res.status(200).json({
-          ok: false,
-          error: "make.js output not JSON",
-          candidate,
-          stdout: s,
-        });
-      }
-    });
+  const sub = s.slice(i);
+  try {
+    const obj = JSON.parse(sub);
+    if (obj && typeof obj === "object" && Object.prototype.hasOwnProperty.call(obj, "ok")) {
+      picked = obj;
+    }
+  } catch (_) {}
+}
+
+if (picked) return res.status(200).json(picked);
+
+return res.status(200).json({
+  ok: false,
+  error: "no {ok:...} JSON found in make.js stdout",
+  stdout: s,
+});
   } catch (e) {
     return res.status(200).json({ ok: false, error: e?.message || String(e) });
   }
