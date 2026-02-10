@@ -1,55 +1,71 @@
 import express from "express";
-import fs from "fs";
-import { exec } from "child_process";
+import fs from "node:fs";
+import { exec } from "node:child_process";
 
 const app = express();
 
-// 1) JSON 파서: limit 키우고, 에러를 JSON으로 반환하도록 준비
+// JSON 바디 파싱 (400을 HTML로 내지 않고 JSON으로 처리하기 위해 아래 에러핸들러 포함)
 app.use(express.json({ limit: "2mb" }));
 
-// 2) 루트/디버그
 app.get("/", (req, res) => {
-  res.json({ ok: true, service: "finishflow-live" });
+  res.status(200).json({ ok: true, service: "finishflow-live" });
 });
 
 app.get("/debug/env", (req, res) => {
-  res.json({
+  res.status(200).json({
     ok: true,
     hasOpenAIKey: !!process.env.OPENAI_API_KEY,
     now: new Date().toISOString(),
   });
 });
 
-// 3) make
 app.post("/make", (req, res) => {
   try {
-    // 바디가 안 들어오면 즉시 원인 반환
+    // Body 검증
     if (!req.body || typeof req.body !== "object") {
-      return res.status(400).json({ ok: false, error: "Invalid JSON body (req.body empty)" });
+      return res.status(400).json({ ok: false, error: "Invalid JSON body (empty)" });
     }
-    if (!req.body.topic) {
+    if (typeof req.body.topic !== "string" || !req.body.topic.trim()) {
       return res.status(400).json({ ok: false, error: "Missing topic in JSON body" });
     }
 
+    // req.json 저장
     fs.writeFileSync("req.json", JSON.stringify(req.body, null, 2));
 
-    exec("node make.js", { maxBuffer: 1024 * 1024 * 10 }, (error, stdout, stderr) => {
+    // make.js 실행
+    exec("node make.js", { maxBuffer: 1024 * 1024 * 20 }, (error, stdout, stderr) => {
+      // make.js 자체 실패
       if (error) {
         return res.status(200).json({
           ok: false,
           error: stderr || error.message || "make.js failed",
+          stdout: String(stdout || "").trim(),
         });
       }
 
-      // make.js가 JSON 한 줄 출력하도록 되어있으니 그대로 파싱
+      // stdout에 로그가 섞여도 마지막 JSON만 파싱
+      const s = String(stdout || "").trim();
+
+      const lastOpen = s.lastIndexOf("{");
+      if (lastOpen === -1) {
+        return res.status(200).json({
+          ok: false,
+          error: "no JSON found in make.js stdout",
+          stdout: s,
+        });
+      }
+
+      const candidate = s.slice(lastOpen);
+
       try {
-        const parsed = JSON.parse(stdout);
+        const parsed = JSON.parse(candidate);
         return res.status(200).json(parsed);
       } catch (e) {
         return res.status(200).json({
           ok: false,
           error: "make.js output not JSON",
-          stdout,
+          candidate,
+          stdout: s,
         });
       }
     });
@@ -58,7 +74,7 @@ app.post("/make", (req, res) => {
   }
 });
 
-// 4) JSON 파싱 에러 핸들러 (이게 없으면 HTML 400이 뜸)
+// JSON 파싱 실패 시 HTML 400 대신 JSON으로 반환
 app.use((err, req, res, next) => {
   if (err?.type === "entity.parse.failed") {
     return res.status(400).json({
