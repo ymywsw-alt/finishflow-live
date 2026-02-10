@@ -33,40 +33,32 @@ app.post("/make", (req, res) => {
     fs.writeFileSync("req.json", JSON.stringify(req.body, null, 2));
 
     // make.js 실행
-    exec("node make.js", { maxBuffer: 1024 * 1024 * 20 }, (error, stdout, stderr) => {
-      // make.js 자체 실패
-      if (error) {
-        return res.status(200).json({
-          ok: false,
-          error: stderr || error.message || "make.js failed",
-          stdout: String(stdout || "").trim(),
-        });
-      }
+    exec("node make.js", { maxBuffer: 1024 * 1024 * 50 }, (error, stdout, stderr) => {
+  const out = String(stdout || "").trim();
+  const err = String(stderr || "").trim();
 
-      // stdout에 로그가 섞여도 마지막 JSON만 파싱
-      const s = String(stdout || "").trim();
-
-let picked = null;
-
-for (let i = 0; i < s.length; i++) {
-  if (s[i] !== "{") continue;
-
-  const sub = s.slice(i);
+  // 1차: 전체 stdout을 JSON으로 시도
   try {
-    const obj = JSON.parse(sub);
-    if (obj && typeof obj === "object" && Object.prototype.hasOwnProperty.call(obj, "ok")) {
-      picked = obj;
-    }
+    const parsed = JSON.parse(out);
+    return res.status(200).json(parsed);
   } catch (_) {}
-}
 
-if (picked) return res.status(200).json(picked);
+  // 2차: 마지막 줄만 JSON 시도
+  const lastLine = out.split("\n").map(s => s.trim()).filter(Boolean).pop() || "";
+  try {
+    const parsed2 = JSON.parse(lastLine);
+    return res.status(200).json(parsed2);
+  } catch (_) {}
 
-return res.status(200).json({
-  ok: false,
-  error: "no {ok:...} JSON found in make.js stdout",
-  stdout: s,
+  // 실패 시 디버그 반환
+  return res.status(200).json({
+    ok: false,
+    error: error?.message || "make.js output not JSON",
+    stdout_tail: out.slice(-2000),
+    stderr_tail: err.slice(-2000),
+  });
 });
+
   
 // JSON 파싱 실패 시 HTML 400 대신 JSON으로 반환
 app.use((err, req, res, next) => {
