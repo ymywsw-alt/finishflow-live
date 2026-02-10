@@ -4,6 +4,8 @@ import { exec } from "node:child_process";
 
 const app = express();
 
+app.use("/out", express.static("/app/out"));
+
 app.use(express.json({ limit: "2mb" }));
 
 app.get("/", (req, res) => {
