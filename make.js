@@ -272,6 +272,11 @@ async function makeVideo({ id, ttsPath, outDir, durationSec }) {
 
     const outDir = path.resolve(process.cwd(), "out", id);
     ensureDir(outDir);
+// bg.jpg를 작업 폴더로 복사
+const bgSrc = path.resolve(process.cwd(), "bg.jpg");
+const bgDst = path.join(outDir, "bg.jpg");
+if (!fs.existsSync(bgSrc)) throw new Error(`bg.jpg missing at ${bgSrc}`);
+fs.copyFileSync(bgSrc, bgDst);
 
     const ttsPath = await generateTTSMp3({ id, script, outDir });
     log("ttsPath:", ttsPath);
