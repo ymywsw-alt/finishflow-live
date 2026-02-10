@@ -67,11 +67,7 @@ return res.status(200).json({
   error: "no {ok:...} JSON found in make.js stdout",
   stdout: s,
 });
-  } catch (e) {
-    return res.status(200).json({ ok: false, error: e?.message || String(e) });
-  }
-});
-
+  
 // JSON 파싱 실패 시 HTML 400 대신 JSON으로 반환
 app.use((err, req, res, next) => {
   if (err?.type === "entity.parse.failed") {
