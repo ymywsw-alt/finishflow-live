@@ -6,7 +6,7 @@ import crypto from "crypto";
 // 기존 callResponses 구현을 이 파일 상단에 그대로 유지하고, 이 파일을 전체교체할 때 함께 포함되어야 합니다.
 // => 안전을 위해, 여기서는 callResponses를 "외부에 이미 존재"하지 않도록 아래에 최소 구현을 포함합니다.
 
-async function openaiJSON(url, payload) {
+async function openaiBinary(url, payload) {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) throw new Error("Missing OPENAI_API_KEY");
 
@@ -19,18 +19,16 @@ async function openaiJSON(url, payload) {
     body: JSON.stringify(payload),
   });
 
-  const text = await res.text();
-  let json = null;
-  try {
-    json = JSON.parse(text);
-  } catch (_) {}
-
   if (!res.ok) {
+    const text = await res.text();
+    let json = null;
+    try { json = JSON.parse(text); } catch (_) {}
     const msg = json?.error?.message || text || `HTTP ${res.status}`;
     throw new Error(`OpenAI error ${res.status}: ${msg}`);
   }
 
-  return json ?? {};
+  const ab = await res.arrayBuffer();
+  return Buffer.from(ab);
 }
 
 const SYSTEM = "Return JSON only.";
@@ -51,7 +49,56 @@ async function callResponses(userText) {
 
   return out;
 }
+async function openaiJSON(url, payload) {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) throw new Error("Missing OPENAI_API_KEY");
 
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${apiKey}`
+    },
+    body: JSON.stringify(payload),
+  });
+
+  const text = await res.text();
+  let json = null;
+  try {
+    json = JSON.parse(text);
+  } catch (_) {}
+
+  if (!res.ok) {
+    const msg = json?.error?.message || text || `HTTP ${res.status}`;
+    throw new Error(`OpenAI error ${res.status}: ${msg}`);
+  }
+
+  return json ?? {};
+}
+async function openaiBinary(url, payload) {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) throw new Error("Missing OPENAI_API_KEY");
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${apiKey}`
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    let json = null;
+    try { json = JSON.parse(text); } catch (_) {}
+    const msg = json?.error?.message || text || `HTTP ${res.status}`;
+    throw new Error(`OpenAI error ${res.status}: ${msg}`);
+  }
+
+  const ab = await res.arrayBuffer();
+  return Buffer.from(ab);
+}
 async function safeMakeScript(req) {
   const topic = typeof req.topic === "string" ? req.topic.trim() : "";
   const videoType = typeof req.videoType === "string" ? req.videoType : "SHORT";
