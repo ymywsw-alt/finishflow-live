@@ -4,15 +4,14 @@ import { exec } from "node:child_process";
 
 const app = express();
 
-// JSON 바디 파싱 (400을 HTML로 내지 않고 JSON으로 처리하기 위해 아래 에러핸들러 포함)
 app.use(express.json({ limit: "2mb" }));
 
 app.get("/", (req, res) => {
-  res.status(200).json({ ok: true, service: "finishflow-live" });
+  return res.status(200).json({ ok: true, service: "finishflow-live" });
 });
 
 app.get("/debug/env", (req, res) => {
-  res.status(200).json({
+  return res.status(200).json({
     ok: true,
     hasOpenAIKey: !!process.env.OPENAI_API_KEY,
     now: new Date().toISOString(),
@@ -34,32 +33,35 @@ app.post("/make", (req, res) => {
 
     // make.js 실행
     exec("node make.js", { maxBuffer: 1024 * 1024 * 50 }, (error, stdout, stderr) => {
-  const out = String(stdout || "").trim();
-  const err = String(stderr || "").trim();
+      const out = String(stdout || "").trim();
+      const err = String(stderr || "").trim();
 
-  // 1차: 전체 stdout을 JSON으로 시도
-  try {
-    const parsed = JSON.parse(out);
-    return res.status(200).json(parsed);
-  } catch (_) {}
+      // 1차: 전체 stdout JSON 파싱
+      try {
+        const parsed = JSON.parse(out);
+        return res.status(200).json(parsed);
+      } catch (_) {}
 
-  // 2차: 마지막 줄만 JSON 시도
-  const lastLine = out.split("\n").map(s => s.trim()).filter(Boolean).pop() || "";
-  try {
-    const parsed2 = JSON.parse(lastLine);
-    return res.status(200).json(parsed2);
-  } catch (_) {}
+      // 2차: 마지막 줄 JSON 파싱
+      const lastLine = out.split("\n").map(s => s.trim()).filter(Boolean).pop() || "";
+      try {
+        const parsed2 = JSON.parse(lastLine);
+        return res.status(200).json(parsed2);
+      } catch (_) {}
 
-  // 실패 시 디버그 반환
-  return res.status(200).json({
-    ok: false,
-    error: error?.message || "make.js output not JSON",
-    stdout_tail: out.slice(-2000),
-    stderr_tail: err.slice(-2000),
-  });
+      // 실패 시 tail 반환
+      return res.status(200).json({
+        ok: false,
+        error: error?.message || "make.js output not JSON",
+        stdout_tail: out.slice(-2000),
+        stderr_tail: err.slice(-2000),
+      });
+    });
+  } catch (e) {
+    return res.status(200).json({ ok: false, error: e?.message || String(e) });
+  }
 });
 
-  
 // JSON 파싱 실패 시 HTML 400 대신 JSON으로 반환
 app.use((err, req, res, next) => {
   if (err?.type === "entity.parse.failed") {
