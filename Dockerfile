@@ -5,12 +5,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
 
 WORKDIR /app
 
-# lib 폴더를 통째로 복사
-COPY lib ./lib
-
-# lib 기준으로 설치/실행
-WORKDIR /app/lib
+COPY package*.json ./
 RUN npm install --omit=dev
+
+COPY . .
 
 EXPOSE 3000
 CMD ["node", "server.js"]
