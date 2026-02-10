@@ -423,7 +423,7 @@ async function validateMp4(mp4Path) {
 }
 
 // ====== main: make video ======
-export async function makeVideo({ topic }) {
+async function makeVideo({ topic }) {
   const id = crypto.randomBytes(6).toString("hex");
   const tmpDir = os.tmpdir();
 
