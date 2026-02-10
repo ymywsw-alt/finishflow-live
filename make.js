@@ -1,6 +1,9 @@
 // make.js (FULL REPLACE)
 // Node 18+ (global fetch), ESM 기준
 
+function log(...a) { console.error("[make]", ...a); }   // 로그는 stderr
+function out(obj) { process.stdout.write(JSON.stringify(obj)); } // stdout은 이것만
+
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
@@ -207,7 +210,7 @@ async function makeVideo({ id, ttsPath, outDir, durationSec }) {
   try {
     const v = await run("ffmpeg", ["-version"]);
     const line = (v.stdout || v.stderr || "").split("\n")[0];
-    console.log("[ffmpeg] installed:", line);
+    log("[ffmpeg] installed:", line);
   } catch (e) {
     const err = new Error("ffmpeg not found or not runnable on this instance");
     err.stderr = e?.stderr;
@@ -233,9 +236,9 @@ async function makeVideo({ id, ttsPath, outDir, durationSec }) {
     outMp4Path,
   ];
 
-  console.log("[ffmpeg] cmd:", "ffmpeg", ffArgs.join(" "));
+  log("[ffmpeg] cmd:", "ffmpeg", ffArgs.join(" "));
   const r = await run("ffmpeg", ffArgs, { cwd: outDir });
-  if (r.stderr) console.log("[ffmpeg][stderr]", r.stderr);
+  if (r.stderr) log("[ffmpeg][stderr]", r.stderr);
 
   if (!fs.existsSync(outMp4Path)) throw new Error("Video not created (mp4 missing)");
   return outMp4Path;
@@ -247,40 +250,41 @@ async function makeVideo({ id, ttsPath, outDir, durationSec }) {
   try {
     const req = JSON.parse(fs.readFileSync("req.json", "utf-8"));
 
-    // 1) script
     const r = await safeMakeScript(req);
     const { id, script, durationSec } = r.parsed;
 
-    // work dir
     const outDir = path.resolve(process.cwd(), "out", id);
     ensureDir(outDir);
 
-    // 2) TTS
     const ttsPath = await generateTTSMp3({ id, script, outDir });
-    console.log("[make] ttsPath:", ttsPath);
+    log("ttsPath:", ttsPath);
 
-    // 3) video
     const videoPath = await makeVideo({ id, ttsPath, outDir, durationSec });
-    console.log("[make] videoPath:", videoPath);
+    log("videoPath:", videoPath);
 
-    // done
     r.parsed.tts_path = ttsPath;
     r.parsed.video_path = videoPath;
 
-    console.log(JSON.stringify({
+    // stdout 단 1회
+    out({
       ok: true,
       parsed: r.parsed,
       download_url: null,
-      ms: Date.now() - t0,
-    }));
+      ms: Date.now() - t0
+    });
+
   } catch (e) {
     const info = briefErr(e);
-    console.error("[make] FAIL:", info);
-    console.log(JSON.stringify({
+    log("FAIL:", info);
+
+    // stdout 단 1회
+    out({
       ok: false,
       error: info,
-      ms: Date.now() - t0,
-    }));
+      ms: Date.now() - t0
+    });
+
     process.exitCode = 1;
   }
 })();
+
