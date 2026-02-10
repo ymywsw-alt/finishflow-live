@@ -1,13 +1,29 @@
-// make.js (FULL REPLACE)
-// Node 18+ (global fetch), ESM 기준
-
-function log(...a) { console.error("[make]", ...a); }   // 로그는 stderr
-function out(obj) { process.stdout.write(JSON.stringify(obj)); } // stdout은 이것만
-
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
+
+// === STDOUT HARD LOCK: allow stdout ONLY via out() ===
+const __stdoutWrite = process.stdout.write.bind(process.stdout);
+globalThis.__ALLOW_STDOUT__ = false;
+
+process.stdout.write = (chunk, encoding, cb) => {
+  if (!globalThis.__ALLOW_STDOUT__) return true;
+  return __stdoutWrite(chunk, encoding, cb);
+};
+
+// redirect console.log to stderr
+console.log = (...a) => console.error("[make]", ...a);
+
+// logs to stderr
+function log(...a) { console.error("[make]", ...a); }
+
+// only out() can write to stdout
+function out(obj) {
+  globalThis.__ALLOW_STDOUT__ = true;
+  __stdoutWrite(JSON.stringify(obj) + "\n");
+  globalThis.__ALLOW_STDOUT__ = false;
+}
 
 const SYSTEM = "Return JSON only.";
 
