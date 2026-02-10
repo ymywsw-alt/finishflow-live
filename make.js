@@ -422,71 +422,70 @@ async function validateMp4(mp4Path) {
   }
 }
 
-// ====== main: make video ======
-async function makeVideo({ topic }) {
-  const id = crypto.randomBytes(6).toString("hex");
-  const tmpDir = os.tmpdir();
+// ===== main: make video (SAFE MODE: SCRIPT ONLY) =====
+// 목적: SHORT 안정화. 영상/TTS/ffmpeg는 잠시 비활성화.
 
-  const voicePath = path.join(tmpDir, `finishflow-${id}.mp3`);
-  const bgmLocalPath = path.join(tmpDir, `finishflow-${id}-bgm.wav`);
-  const mp4Path = path.join(tmpDir, `finishflow-${id}.mp4`);
+async function makeVideo({ topic, videoType, topicTone, durationSec }) {
+  // SHORT 기준 간단 프롬프트
+  const userText =
+    `topic: ${topic}\n` +
+    `type: ${videoType}\n` +
+    `tone: ${topicTone}\n` +
+    `seconds: ${durationSec}\n` +
+    `Write a Korean voiceover script.\n` +
+    `Return JSON only in this schema: {"script":"..."}\n` +
+    `No markdown.`;
 
-  // 1) script
-  const script = await generateScript(topic);
+  const raw = await callResponses(userText);
 
-  // 2) tts
-  const { mp3, cleaned } = await generateTTSMp3(script);
-  fs.writeFileSync(voicePath, mp3);
-
-  // 3) duration
-  const durationSec = await getDurationSeconds(voicePath);
-
-  // 4) try AudioFlow BGM (fail-open)
-  let bgmInfo = null;
-  let bgmPath = null;
+  // JSON 파싱(안전)
+  let parsed = null;
   try {
-    bgmInfo = await requestAudioFlowBgm({ topic, durationSec });
-    if (bgmInfo?.download_url) {
-      await downloadToFile(bgmInfo.download_url, bgmLocalPath);
-      bgmPath = bgmLocalPath;
-    }
+    parsed = JSON.parse(raw);
   } catch (e) {
-    console.log("[BGM] skipped:", e?.message || e);
-    bgmInfo = null;
-    bgmPath = null;
+    // 모델이 JSON만 안 주는 경우 대비: 강제 래핑
+    parsed = { script: raw };
   }
 
-  // 5) render mp4
-  await renderMp4({
-    title: topic,
-    voiceAudioPath: voicePath,
-    bgmPath,
-    outPath: mp4Path,
-    durationSec
-  });
+  if (!parsed || !parsed.script || typeof parsed.script !== "string") {
+    parsed = { script: String(raw || "").trim() };
+  }
 
-  // 6) validate
-  await validateMp4(mp4Path);
+  if (!parsed.script) throw new Error("Empty script from OpenAI");
 
-  // NOTE:
-  // - server.js now issues the FINAL download token.
-  // - We still return video_path for server.js to create its own token.
+  // SAFE MODE에서는 video_path를 만들지 않는다.
+  // server.js가 download_url 없으면 null로 처리.
   return {
     ok: true,
-    step: 4,
-    topic,
-    audio_generated: true,
-    video_generated: true,
-    video_path: mp4Path,
-    meta: {
-      duration_sec: Math.round(durationSec),
-      tts_input_preview: cleaned.slice(0, 120),
-      bgm_used: !!bgmPath,
-      bgm_preset: bgmInfo?.preset || "",
-      bgm_download_url: bgmInfo?.download_url || ""
-    }
+    parsed: {
+      script: parsed.script,
+      video_path: null,
+    },
+    download_url: null,
   };
 }
+
+// ---- 실행 진입점 (runMakeJS가 이 함수를 호출하는 구조라면 유지됨) ----
+(async () => {
+  try {
+    // req.json에서 읽는 기존 흐름을 유지 (이미 당신 시스템에 있음)
+    const fs = await import("fs");
+    const req = JSON.parse(fs.readFileSync("req.json", "utf-8"));
+
+    const topic = req.topic || "";
+    const videoType = req.videoType || "SHORT";
+    const topicTone = req.topicTone || "CALM";
+    const durationSec = typeof req.durationSec === "number" ? req.durationSec : 45;
+
+    const r = await makeVideo({ topic, videoType, topicTone, durationSec });
+
+    // runMakeJS가 stdout을 파싱한다면 JSON 한 줄로 고정
+    console.log(JSON.stringify({ ok: true, parsed: r.parsed, download_url: r.download_url }));
+  } catch (e) {
+    console.log(JSON.stringify({ ok: false, error: e?.message || String(e) }));
+    process.exitCode = 1;
+  }
+})();
 
 // ====== direct run: read req.json and print JSON ======
 function readReqJson() {
