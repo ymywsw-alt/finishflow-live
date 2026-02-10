@@ -241,8 +241,9 @@ async function makeVideo({ id, ttsPath, outDir, durationSec }) {
   const safeDur = Math.max(5, Math.floor(Number(durationSec || 45)));
   const ffArgs = [
     "-y",
-    "-f", "lavfi",
-    "-i", `color=c=black:s=1280x720:r=30:d=${safeDur}`,
+    "-loop", "1",
+"-i", "bg.jpg",
+"-t", `${safeDur}`,
     "-i", ttsPath,
     "-c:v", "libx264",
     "-pix_fmt", "yuv420p",
