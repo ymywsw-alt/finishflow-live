@@ -194,41 +194,6 @@ for (let part = 1; part <= 7; part++) {
 
 let text = parts.join("\n\n").trim();
 
-  // 2) if too short, auto-extend 1~2 times
-  const minCharsNoSpace = 14000; // 8~12분 목표(공백 제외) 안전 기준
-  const maxExtend = 2;
-
-  function charsNoSpace(s) {
-    return (s || "").replace(/\s+/g, "").length;
-  }
-
- /* for (let i = 0; i < maxExtend; i++) {
-    if (charsNoSpace(text) >= minCharsNoSpace) break;
-
-    const extendPrompt = `
-지금 대본이 너무 짧습니다. 아래 대본을 "그대로 이어서" 확장하세요.
-조건:
-- 같은 톤(차분/단정/시니어 대상)을 유지
-- 각 섹션에 구체적 사례를 2개 이상 추가
-- 체크리스트/실천 단계/주의사항을 더 촘촘히 추가
-- 마크다운 기호(**, #, [, ]) 금지
-- 처음부터 다시 쓰지 말고, 반드시 "이어서"만 출력
-
-[기존 대본]
-${text}
-
-[이어서 확장]
-`.trim();
-
-    const add = await callResponses(extendPrompt);
-    if (!add) break;
-    text = (text + "\n" + add).trim();
-  } */
-
-  if (!text) throw new Error("Empty script from OpenAI");
-  return text;
-}
-
 // ====== TTS (mp3) ======
 // 업그레이드: gpt-4o-mini-tts (체감 품질 상승)
 // voice/speed는 유지
