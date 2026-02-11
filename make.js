@@ -308,9 +308,9 @@ const raw = await callResponses(prefix + userText);
   titleStyle: t.style,
   titleCandidates: t.candidates,
   script,
-}
-      video_path: null,
-      tts_path: null,
+},
+video_path: null,
+tts_path: null,
       id: crypto.randomBytes(6).toString("hex"),
       durationSec,
       videoType,
