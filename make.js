@@ -316,7 +316,6 @@ tts_path: null,
       videoType,
       topicTone,
       topic,
-    },
     download_url: null,
   };
 }
