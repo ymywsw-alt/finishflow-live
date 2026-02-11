@@ -1,7 +1,75 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
-import { spawn } from "node:child_process";
+import os from "node:os";
+import { spawn, execSync } from "node:child_process";
+
+function safeJson(x) {
+  try { return JSON.parse(x); } catch { return null; }
+}
+
+async function fetchJson(url, headers = {}) {
+  const r = await fetch(url, { headers });
+  const t = await r.text();
+  if (!r.ok) throw new Error(`HTTP ${r.status}: ${t.slice(0,200)}`);
+  const j = safeJson(t);
+  if (!j) throw new Error(`JSON parse failed: ${t.slice(0,200)}`);
+  return j;
+}
+
+async function downloadToFile(url, outPath) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`download failed ${r.status}: ${url}`);
+  const buf = Buffer.from(await r.arrayBuffer());
+  fs.writeFileSync(outPath, buf);
+}
+
+function unsplashFallbackUrls(query, n) {
+  return Array.from({ length: n }, (_, i) =>
+    `https://source.unsplash.com/1600x900/?${encodeURIComponent(query)}&sig=${Date.now()}_${i}`
+  );
+}
+
+async function getPexelsUrls(query, n, key) {
+  if (!key || key === "temp") return [];
+  const j = await fetchJson(
+    `https://api.pexels.com/v1/search?query=${encodeURIComponent(query)}&per_page=${Math.min(80, n*3)}`,
+    { Authorization: key }
+  );
+  const photos = Array.isArray(j.photos) ? j.photos : [];
+  return photos
+    .map(p => p?.src?.landscape || p?.src?.large || p?.src?.original)
+    .filter(Boolean)
+    .slice(0, n);
+}
+
+async function getPixabayUrls(query, n, key) {
+  if (!key || key === "temp") return [];
+  const j = await fetchJson(
+    `https://pixabay.com/api/?key=${encodeURIComponent(key)}&q=${encodeURIComponent(query)}&image_type=photo&orientation=horizontal&per_page=${Math.min(200, n*3)}&safesearch=true`
+  );
+  const hits = Array.isArray(j.hits) ? j.hits : [];
+  return hits
+    .map(h => h?.largeImageURL || h?.webformatURL)
+    .filter(Boolean)
+    .slice(0, n);
+}
+
+async function collectImageUrls(query) {
+  const pexelsKey = process.env.PEXELS_API_KEY || "";
+  const pixabayKey = process.env.PIXABAY_API_KEY || "";
+
+  const pex = await getPexelsUrls(query, 3, pexelsKey).catch(() => []);
+  const pix = await getPixabayUrls(query, 3, pixabayKey).catch(() => []);
+  const uns = unsplashFallbackUrls(query, 2);
+
+  const urls = [...pex, ...pix, ...uns].filter(Boolean);
+
+  while (urls.length < 8) {
+    urls.push(...unsplashFallbackUrls(query, 1));
+  }
+  return urls.slice(0, 8);
+}
 
 // === STDOUT HARD LOCK: allow stdout ONLY via out() ===
 const __stdoutWrite = process.stdout.write.bind(process.stdout);
@@ -214,50 +282,52 @@ async function generateTTSMp3({ id, script, outDir }) {
   return outMp3Path;
 }
 
-// ---------- VIDEO (minimal, deterministic) ----------
-async function makeVideo({ id, ttsPath, outDir, durationSec }) {
+// ----------- VIDEO (slideshow, deterministic) -----------
+async function makeVideo({ id, ttsPath, outDir, durationSec, topic }) {
   must(id, "id");
   must(ttsPath, "ttsPath");
   must(outDir, "outDir");
 
   ensureDir(outDir);
 
-  // ffmpeg 존재 확인 (없으면 여기서 원인 확정)
-  try {
-    const v = await run("ffmpeg", ["-version"]);
-    const line = (v.stdout || v.stderr || "").split("\n")[0];
-    log("[ffmpeg] installed:", line);
-  } catch (e) {
-    const err = new Error("ffmpeg not found or not runnable on this instance");
-    err.stderr = e?.stderr;
-    throw err;
+  // 8장 고정
+  const query = (topic || "시니어 건강 정보").toString().slice(0, 80);
+  const imageUrls = await collectImageUrls(query);
+
+  const imageDir = path.join(os.tmpdir(), `finishflow-images-${id}`);
+  fs.mkdirSync(imageDir, { recursive: true });
+
+  const imagePaths = [];
+  for (let i = 0; i < 8; i++) {
+    const p = path.join(imageDir, `img${i}.jpg`);
+    await downloadToFile(imageUrls[i], p);
+    imagePaths.push(p);
   }
 
+  // 10~12분 목표: 기본 80초(=10분40초)
+  // durationSec를 넘겨받으면 그걸 우선 사용해도 되지만,
+  // 현재 기준선은 10~12분 고정이므로 80초로 고정 운영.
+  const perImageSec = 80;
+
+  const slideVideoPath = path.join(os.tmpdir(), `finishflow-${id}-slides.mp4`);
   const outMp4Path = path.join(outDir, `${id}.mp4`);
 
-  // 배경 단색 + TTS 오디오 합성 (이미지 없어도 무조건 동작)
-  // -shortest로 오디오 길이 기준 종료
-  // durationSec는 배경 source 길이(최소보장)로만 사용
-  const safeDur = Math.max(5, Math.floor(Number(durationSec || 45)));
-  const ffArgs = [
-    "-y",
-    "-loop", "1",
-"-i", "/app/bg.jpg",
-"-t", `${safeDur}`,
-    "-i", ttsPath,
-    "-c:v", "libx264",
-    "-pix_fmt", "yuv420p",
-    "-c:a", "aac",
-    "-b:a", "192k",
-    "-shortest",
-    outMp4Path,
-  ];
+  // (1) 슬라이드 영상(무음) 생성
+  const inputs = imagePaths.map(p => `-loop 1 -t ${perImageSec} -i "${p}"`).join(" ");
+  const slideCmd =
+    `ffmpeg -y ${inputs} ` +
+    `-filter_complex "concat=n=8:v=1:a=0,format=yuv420p" ` +
+    `-r 30 "${slideVideoPath}"`;
 
-  log("[ffmpeg] cmd:", "ffmpeg", ffArgs.join(" "));
-  const r = await run("ffmpeg", ffArgs, { cwd: outDir });
-  if (r.stderr) log("[ffmpeg][stderr]", r.stderr);
+  execSync(slideCmd, { stdio: "inherit" });
 
-  if (!fs.existsSync(outMp4Path)) throw new Error("Video not created (mp4 missing)");
+  // (2) 슬라이드 + TTS 합성 (최종 mp4)
+  const finalCmd =
+    `ffmpeg -y -i "${slideVideoPath}" -i "${ttsPath}" ` +
+    `-c:v copy -c:a aac -shortest "${outMp4Path}"`;
+
+  execSync(finalCmd, { stdio: "inherit" });
+
   return outMp4Path;
 }
 
@@ -281,7 +351,7 @@ fs.copyFileSync(bgSrc, bgDst);
     const ttsPath = await generateTTSMp3({ id, script, outDir });
     log("ttsPath:", ttsPath);
 
-    const videoPath = await makeVideo({ id, ttsPath, outDir, durationSec });
+    const videoPath = await makeVideo({ id, ttsPath, outDir, durationSec, topic });
     log("videoPath:", videoPath);
 
     r.parsed.tts_path = ttsPath;
