@@ -1,25 +1,25 @@
-import express from "express";
-import fs from "node:fs";
-import { exec } from "node:child_process";
+// server.js (FULL REPLACE)
+// finishflow-live: /make runs make.js and returns its JSON
+// /download serves generated mp4 by token (= id)
+
+const express = require("express");
+const fs = require("fs");
+const path = require("path");
+const { exec } = require("child_process");
 
 const app = express();
 
-app.use("/out", express.static("/app/out"));
-
+// Render/Proxy 환경에서 body 파싱
 app.use(express.json({ limit: "2mb" }));
 
+// 간단 상태 확인용
 app.get("/", (req, res) => {
-  return res.status(200).json({ ok: true, service: "finishflow-live" });
+  res.status(200).send("finishflow-live ok");
 });
 
-app.get("/debug/env", (req, res) => {
-  return res.status(200).json({
-    ok: true,
-    hasOpenAIKey: !!process.env.OPENAI_API_KEY,
-    now: new Date().toISOString(),
-  });
-});
-
+// ========================
+// POST /make
+// ========================
 app.post("/make", (req, res) => {
   try {
     // Body 검증
@@ -30,31 +30,38 @@ app.post("/make", (req, res) => {
       return res.status(400).json({ ok: false, error: "Missing topic in JSON body" });
     }
 
-    // req.json 저장
-    fs.writeFileSync("req.json", JSON.stringify(req.body, null, 2));
+    // req.json 저장(디버깅용)
+    try {
+      fs.writeFileSync("req.json", JSON.stringify(req.body, null, 2));
+    } catch (_) {}
 
     // make.js 실행
     exec("node make.js", { maxBuffer: 1024 * 1024 * 50 }, (error, stdout, stderr) => {
       const out = String(stdout || "").trim();
       const err = String(stderr || "").trim();
 
-      // 1차: 전체 stdout JSON 파싱
+      // 1차: 전체 stdout JSON 파싱 시도
       try {
         const parsed = JSON.parse(out);
         return res.status(200).json(parsed);
       } catch (_) {}
 
-      // 2차: 마지막 줄 JSON 파싱
-      const lastLine = out.split("\n").map(s => s.trim()).filter(Boolean).pop() || "";
+      // 2차: 마지막 줄 JSON 파싱 시도
+      const lastLine = out
+        .split("\n")
+        .map(s => s.trim())
+        .filter(Boolean)
+        .pop() || "";
+
       try {
         const parsed2 = JSON.parse(lastLine);
         return res.status(200).json(parsed2);
       } catch (_) {}
 
-      // 실패 시 tail 반환
+      // 실패: tail 반환
       return res.status(200).json({
         ok: false,
-        error: error?.message || "make.js output not JSON",
+        error: (error && error.message) || "make.js output not JSON",
         stdout_tail: out.slice(-2000),
         stderr_tail: err.slice(-2000),
       });
@@ -64,17 +71,38 @@ app.post("/make", (req, res) => {
   }
 });
 
-// JSON 파싱 실패 시 HTML 400 대신 JSON으로 반환
-app.use((err, req, res, next) => {
-  if (err?.type === "entity.parse.failed") {
-    return res.status(400).json({
-      ok: false,
-      error: "Bad JSON (parse failed)",
-      detail: err.message,
-    });
+// ========================
+// GET /download?token=xxxx
+// token == id (hex)
+// file path: /app/out/<token>/<token>.mp4
+// ========================
+app.get("/download", (req, res) => {
+  try {
+    const token = String(req.query.token || "").trim();
+
+    // token 안전 검증(경로 공격 방지)
+    if (!/^[a-f0-9]{8,40}$/i.test(token)) {
+      return res.status(400).send("Invalid token");
+    }
+
+    // Render 컨테이너 기준 경로
+    const mp4Path = path.resolve("/app/out", token, `${token}.mp4`);
+
+    if (!fs.existsSync(mp4Path)) {
+      return res.status(404).send("File not found");
+    }
+
+    res.setHeader("Content-Type", "video/mp4");
+    res.setHeader("Content-Disposition", `attachment; filename="${token}.mp4"`);
+
+    return res.sendFile(mp4Path);
+  } catch (e) {
+    return res.status(500).send("Download error");
   }
-  return res.status(500).json({ ok: false, error: err?.message || "Server error" });
 });
 
-const port = process.env.PORT || 3000;
-app.listen(port, () => console.log("server running on port", port));
+// Render가 요구하는 PORT 바인딩
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => {
+  console.log("finishflow-live listening on port", PORT);
+});
