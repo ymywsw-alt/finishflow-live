@@ -334,7 +334,9 @@ async function makeVideo({ id, ttsPath, outDir, durationSec, topic }) {
   for (let i = 0; i < 8; i++) {
     const p = path.join(imageDir, `img${i}.jpg`);
     await downloadToFile(imageUrls[i], p);
-    imagePaths.push(p);
+if (fs.statSync(p).size < 10_000) throw new Error(`image too small (likely invalid): ${p}`);
+imagePaths.push(p);
+
   }
 
   // 10~12분 목표: 기본 80초(=10분40초)
@@ -346,13 +348,26 @@ async function makeVideo({ id, ttsPath, outDir, durationSec, topic }) {
   const outMp4Path = path.join(outDir, `${id}.mp4`);
 
   // (1) 슬라이드 영상(무음) 생성
-  const inputs = imagePaths.map(p => `-loop 1 -t ${perImageSec} -i "${p}"`).join(" ");
-  const slideCmd =
-    `ffmpeg -y ${inputs} ` +
-    `-filter_complex "concat=n=8:v=1:a=0,format=yuv420p" ` +
-    `-r 30 "${slideVideoPath}"`;
+  // concat demuxer용 리스트 파일 생성
+const listPath = path.join(os.tmpdir(), `finishflow-${id}-list.txt`);
+const lines = [];
+for (const p of imagePaths) {
+  // 각 이미지 파일을 perImageSec 초 동안 보여줌
+  lines.push(`file '${p.replace(/'/g, "'\\''")}'`);
+  lines.push(`duration ${perImageSec}`);
+}
+// 마지막 file은 duration이 무시될 수 있어 한번 더 넣어줌(권장)
+lines.push(`file '${imagePaths[imagePaths.length - 1].replace(/'/g, "'\\''")}'`);
 
-  execSync(slideCmd, { stdio: "inherit" });
+fs.writeFileSync(listPath, lines.join("\n"), "utf8");
+
+// 슬라이드 영상 생성(무음)
+const slideCmd =
+  `ffmpeg -y -f concat -safe 0 -i "${listPath}" ` +
+  `-vf "scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720,format=yuv420p" ` +
+  `-r 30 "${slideVideoPath}"`;
+
+execSync(slideCmd, { stdio: "inherit" });
 
   // (2) 슬라이드 + TTS 합성 (최종 mp4)
   const finalCmd =
