@@ -17,11 +17,37 @@ async function fetchJson(url, headers = {}) {
   return j;
 }
 
+function sleep(ms) {
+  return new Promise(r => setTimeout(r, ms));
+}
+
 async function downloadToFile(url, outPath) {
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(`download failed ${r.status}: ${url}`);
-  const buf = Buffer.from(await r.arrayBuffer());
-  fs.writeFileSync(outPath, buf);
+  const tries = [0, 800, 2000, 4000];
+  let lastErr = null;
+
+  for (let i = 0; i < tries.length; i++) {
+    if (tries[i]) await sleep(tries[i]);
+
+    try {
+      const r = await fetch(url, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (FinishFlowBot/1.0)"
+        }
+      });
+
+      if (!r.ok) {
+        throw new Error(`download failed ${r.status}: ${url}`);
+      }
+
+      const buf = Buffer.from(await r.arrayBuffer());
+      fs.writeFileSync(outPath, buf);
+      return;
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+
+  throw lastErr;
 }
 
 function unsplashFallbackUrls(query, n) {
