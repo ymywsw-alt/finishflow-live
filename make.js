@@ -307,6 +307,7 @@ const raw = await callResponses(prefix + userText);
   return {
     ok: true,
     parsed: {
+  id: crypto.randomBytes(6).toString("hex"),
   title,
   titleStyle: t.style,
   titleCandidates: t.candidates,
@@ -314,7 +315,6 @@ const raw = await callResponses(prefix + userText);
 },
 video_path: null,
 tts_path: null,
-      id: crypto.randomBytes(6).toString("hex"),
       durationSec,
       videoType,
       topicTone,
