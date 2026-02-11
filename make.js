@@ -351,7 +351,7 @@ fs.copyFileSync(bgSrc, bgDst);
     const ttsPath = await generateTTSMp3({ id, script, outDir });
     log("ttsPath:", ttsPath);
 
-    const videoPath = await makeVideo({ id, ttsPath, outDir, durationSec, topic });
+    const videoPath = await makeVideo({ id, ttsPath, outDir, durationSec, topic: body.topic });
     log("videoPath:", videoPath);
 
     r.parsed.tts_path = ttsPath;
