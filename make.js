@@ -91,10 +91,17 @@ async function collectImageUrls(query) {
 
   const urls = [...pex, ...pix, ...uns].filter(Boolean);
 
-  while (urls.length < 8) {
-    urls.push(...unsplashFallbackUrls(query, 1));
-  }
-  return urls.slice(0, 8);
+  // 키가 없어서 urls가 0이면, 여기서 명확하게 멈춰야 함(Unsplash로 안 감)
+if (urls.length === 0) {
+  throw new Error("No image sources available. Set PIXABAY_API_KEY (recommended) or PEXELS_API_KEY.");
+}
+
+// 부족하면 기존 urls를 반복해서 8장 채움(네트워크 추가 호출 없음)
+while (urls.length < 8) {
+  urls.push(urls[urls.length % Math.max(1, urls.length)]);
+}
+
+return urls.slice(0, 8);
 }
 
 // === STDOUT HARD LOCK: allow stdout ONLY via out() ===
