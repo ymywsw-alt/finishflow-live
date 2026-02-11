@@ -308,7 +308,6 @@ const raw = await callResponses(prefix + userText);
   titleStyle: t.style,
   titleCandidates: t.candidates,
   script,
-  ...
 }
       video_path: null,
       tts_path: null,
