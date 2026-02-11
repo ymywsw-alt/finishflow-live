@@ -291,7 +291,10 @@ async function safeMakeScript(req) {
     `Write a Korean voiceover script.\n` +
     `Return JSON only in schema {"script":"..."}.\n` +
     `No markdown.`;
-
+  
+const t = await makeTitle(topic);
+const title = t.chosenTitle;
+  
   const prefix = `제목: ${title}\n이 제목에 맞는 시니어 대상 스크립트를 작성한다.\n\n`;
 const raw = await callResponses(prefix + userText);
 
