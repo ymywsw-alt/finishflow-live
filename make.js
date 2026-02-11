@@ -409,7 +409,8 @@ fs.copyFileSync(bgSrc, bgDst);
     out({
       ok: true,
       parsed: r.parsed,
-      download_url: null,
+      download_url: `/download?token=${r.token}`,
+
       ms: Date.now() - t0
     });
 
