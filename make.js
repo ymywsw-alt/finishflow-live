@@ -1,3 +1,5 @@
+import { pickStyle, getWeights } from "./lib/titleBandit.js";
+import { buildTitlePrompt } from "./lib/titlePrompt.js";
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
@@ -6,6 +8,27 @@ import { spawn, execSync } from "node:child_process";
 
 function safeJson(x) {
   try { return JSON.parse(x); } catch { return null; }
+}
+async function makeTitle(topic) {
+  const style = pickStyle();
+  const { SYSTEM, USER } = buildTitlePrompt(topic, style);
+
+  const raw = await callResponses(`${SYSTEM}\n\n${USER}`);
+
+  const candidates = String(raw || "")
+    .split("\n")
+    .map(s => s.trim())
+    .filter(Boolean)
+    .slice(0, 5);
+
+  const chosenTitle = (candidates[0] || topic).trim();
+
+  console.log("TITLE_STYLE:", style);
+  console.log("TITLE_CANDIDATES:", candidates);
+  console.log("TITLE_CHOSEN:", chosenTitle);
+  console.log("TITLE_WEIGHTS:", getWeights().normalized);
+
+  return { style, candidates, chosenTitle };
 }
 
 async function fetchJson(url, headers = {}) {
@@ -269,7 +292,8 @@ async function safeMakeScript(req) {
     `Return JSON only in schema {"script":"..."}.\n` +
     `No markdown.`;
 
-  const raw = await callResponses(userText);
+  const prefix = `제목: ${title}\n이 제목에 맞는 시니어 대상 스크립트를 작성한다.\n\n`;
+const raw = await callResponses(prefix + userText);
 
   let parsed = null;
   try { parsed = JSON.parse(raw); } catch (_) { parsed = { script: raw }; }
@@ -280,7 +304,12 @@ async function safeMakeScript(req) {
   return {
     ok: true,
     parsed: {
-      script,
+  title,
+  titleStyle: t.style,
+  titleCandidates: t.candidates,
+  script,
+  ...
+}
       video_path: null,
       tts_path: null,
       id: crypto.randomBytes(6).toString("hex"),
@@ -320,6 +349,9 @@ async function makeVideo({ id, ttsPath, outDir, durationSec, topic }) {
   must(id, "id");
   must(ttsPath, "ttsPath");
   must(outDir, "outDir");
+  
+const t = await makeTitle(topic);
+const title = t.chosenTitle;
 
   ensureDir(outDir);
 
