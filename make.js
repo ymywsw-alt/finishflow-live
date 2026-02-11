@@ -86,8 +86,8 @@ async function collectImageUrls(query) {
   const pixabayKey = process.env.PIXABAY_API_KEY || "";
 
   const pex = await getPexelsUrls(query, 3, pexelsKey).catch(() => []);
-  const pix = await getPixabayUrls(query, 3, pixabayKey).catch(() => []);
-  const uns = unsplashFallbackUrls(query, 2);
+  const pix = await getPixabayUrls(query, 8, pixabayKey).catch(() => []);
+  const uns = [];
 
   const urls = [...pex, ...pix, ...uns].filter(Boolean);
 
