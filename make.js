@@ -260,7 +260,10 @@ async function openaiBinary(url, payload) {
 async function callResponses(userText) {
   const MIN_SCRIPT_CHARS = 7000;
   const MAX_TRIES = 6;
+  
 let lastLen = 0;
+let lastPromptLen = 0;
+let lastPromptHead = "";
 
   for (let i = 1; i <= MAX_TRIES; i++) {
     const hardSpec =
