@@ -383,7 +383,8 @@ imagePaths.push(p);
   // 10~12분 목표: 기본 80초(=10분40초)
   // durationSec를 넘겨받으면 그걸 우선 사용해도 되지만,
   // 현재 기준선은 10~12분 고정이므로 80초로 고정 운영.
-  const perImageSec = 2; // 테스트용: 8장×2초=16초
+  const TARGET_IMAGES = 8; // 현재 이미지 개수와 동일
+const perImageSec = Math.max(6, Math.floor((durationSec || 600) / TARGET_IMAGES));
 
   const slideVideoPath = path.join(os.tmpdir(), `finishflow-${id}-slides.mp4`);
   const outMp4Path = path.join(outDir, `${id}.mp4`);
