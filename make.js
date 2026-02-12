@@ -316,8 +316,8 @@ const d = await openaiJSON("https://api.openai.com/v1/responses", {
 
   return "";
 };
-
 const text = pickText(d);
+console.log("TEXT PICKED LEN:", text.length);
 
     console.log("SCRIPT LENGTH:", text.length);
 
