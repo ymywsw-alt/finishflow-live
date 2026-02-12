@@ -372,7 +372,6 @@ const title = t.chosenTitle;
   fs.mkdirSync(imageDir, { recursive: true });
 
   const imagePaths = [];
-  const imagePaths = [];
 
 if (!Array.isArray(imageUrls) || imageUrls.length === 0) {
   throw new Error("No image URLs collected");
