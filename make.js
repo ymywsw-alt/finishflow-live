@@ -318,6 +318,9 @@ const d = await openaiJSON("https://api.openai.com/v1/responses", {
     { role: "user", content: prompt },
   ],
 });
+    
+console.log("RESP_KEYS:", Object.keys(d || {}));
+console.log("RESP_SNIP:", JSON.stringify(d).slice(0, 800));
 
     const pickText = (obj) => {
   if (typeof obj?.output_text === "string" && obj.output_text.trim()) return obj.output_text.trim();
@@ -341,7 +344,7 @@ const d = await openaiJSON("https://api.openai.com/v1/responses", {
   const m = obj?.choices?.[0]?.message?.content;
   if (typeof m === "string" && m.trim()) return m.trim();
 
-  return "";
+  return JSON.stringify(obj).slice(0, 2000);
 };
 const text = pickText(d);
 console.log("TEXT PICKED LEN:", text.length);
