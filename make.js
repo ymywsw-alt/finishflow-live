@@ -281,11 +281,7 @@ async function callResponses(userText) {
         : `\n\n[재작성]\n이전 대본이 너무 짧았습니다. 반드시 ${MIN_SCRIPT_CHARS}자 이상으로 더 길고 구체적으로 다시 작성하세요.\n`;
 
     const prompt = userText + retryNudge + hardSpec;
-
     console.log("PROMPT LEN:", prompt.length, "TRY:", i);
-
-    const prompt = userText + retryHint;
-console.log("PROMPT LEN:", prompt.length, "TRY:", i);
 
 const d = await openaiJSON("https://api.openai.com/v1/responses", {
   model: "gpt-4.1-mini",
