@@ -312,6 +312,10 @@ const raw = await callResponses(prefix + userText);
   const script = typeof parsed?.script === "string" ? parsed.script : "";
 console.log("SCRIPT LENGTH:", script.length);
 
+  const MIN_SCRIPT_CHARS = 7000;
+if (script.length < MIN_SCRIPT_CHARS) {
+  throw new Error(`Script too short: ${script.length} (min ${MIN_SCRIPT_CHARS})`);
+}
 if (!script) throw new Error("Empty script from OpenAI");
 
   return {
