@@ -284,13 +284,14 @@ async function safeMakeScript(req) {
   if (!topic) throw new Error("Missing topic");
 
   const userText =
-    `topic: ${topic}\n` +
-    `type: ${videoType}\n` +
-    `tone: ${topicTone}\n` +
-    `seconds: ${durationSec}\n` +
-    `Write a Korean voiceover script.\n` +
-    `Return JSON only in schema {"script":"..."}.\n` +
-    `No markdown.`;
+  `topic: ${topic}\n` +
+  `type: ${videoType}\n` +
+  `tone: ${topicTone}\n` +
+  `seconds: ${durationSec}\n` +
+  `Write a Korean voiceover script.\n` +
+  `Script must be 10-12 minutes when read aloud (at least 2200 Korean characters).\n` +
+  `Return JSON only in schema {"script":"..."}.\n` +
+  `No markdown.`;
   
 const t = await makeTitle(topic);
 const title = t.chosenTitle;
