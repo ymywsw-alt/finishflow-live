@@ -295,11 +295,7 @@ async function callResponses(userText) {
 
   throw new Error("Failed to generate sufficiently long script");
 }
-  const out =
-    (d.output_text || "").trim() ||
-    (d.output?.[0]?.content?.find((c) => c.type === "output_text")?.text || "").trim();
-
-  return out;
+  
 }
 
 async function safeMakeScript(req) {
@@ -317,7 +313,7 @@ async function safeMakeScript(req) {
 `tone: ${topicTone}\n` +
 `seconds: ${durationSec}\n` +
 `Write a LONG and detailed Korean voiceover script.\n` +
-`Minimum length: 3500 Korean characters.\n` +
+`Minimum length: 7000 Korean characters.\n` +
 `The script must take 10-12 minutes when read aloud.\n` +
 `Structure the script with:\n` +
 `1. Opening hook\n` +
