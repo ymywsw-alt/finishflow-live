@@ -285,7 +285,13 @@ let lastPromptHead = "";
         : `\n\n[재작성]\n이전 대본이 너무 짧았습니다. 반드시 ${MIN_SCRIPT_CHARS}자 이상으로 더 길고 구체적으로 다시 작성하세요.\n`;
 
     const prompt = userText + retryNudge + hardSpec;
-    console.log("PROMPT LEN:", prompt.length, "TRY:", i);
+    
+    lastPromptLen = prompt.length;
+lastPromptHead = prompt.slice(0, 200).replace(/\s+/g, " ");
+console.log("PROMPT_LEN:", lastPromptLen);
+console.log("PROMPT_HEAD:", lastPromptHead);
+
+    console.log("PROMPT LEN:", lastPromptLen, "TRY:", i);
 
 const d = await openaiJSON("https://api.openai.com/v1/responses", {
   model: "gpt-4.1-mini",
@@ -331,7 +337,9 @@ lastLen = text.length;
     }
   }
 
-  throw new Error(`Failed to generate sufficiently long script (lastLen=${lastLen}, min=${MIN_SCRIPT_CHARS})`);
+  throw new Error(
+  `Failed to generate sufficiently long script (lastLen=${lastLen}, min=${MIN_SCRIPT_CHARS}, promptLen=${lastPromptLen})`
+);
 }
 
 async function safeMakeScript(req) {
