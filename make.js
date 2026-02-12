@@ -372,13 +372,19 @@ const title = t.chosenTitle;
   fs.mkdirSync(imageDir, { recursive: true });
 
   const imagePaths = [];
-  for (let i = 0; i < 40; i++) {
-    const p = path.join(imageDir, `img${i}.jpg`);
-    await downloadToFile(imageUrls[i], p);
-if (fs.statSync(p).size < 10_000) throw new Error(`image too small (likely invalid): ${p}`);
-imagePaths.push(p);
+  const imagePaths = [];
 
-  }
+if (!Array.isArray(imageUrls) || imageUrls.length === 0) {
+  throw new Error("No image URLs collected");
+}
+
+for (let i = 0; i < TARGET_IMAGES; i++) {
+  const url = imageUrls[i % imageUrls.length]; // 부족하면 반복 사용
+  const p = path.join(imageDir, `img${i}.jpg`);
+  await downloadToFile(url, p);
+  if (fs.statSync(p).size < 10_000) throw new Error(`image too small (likely invalid): ${p}`);
+  imagePaths.push(p);
+}
 
   // 10~12분 목표: 기본 80초(=10분40초)
   // durationSec를 넘겨받으면 그걸 우선 사용해도 되지만,
