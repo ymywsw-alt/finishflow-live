@@ -372,7 +372,7 @@ const title = t.chosenTitle;
   fs.mkdirSync(imageDir, { recursive: true });
 
   const imagePaths = [];
-  for (let i = 0; i < 8; i++) {
+  for (let i = 0; i < 40; i++) {
     const p = path.join(imageDir, `img${i}.jpg`);
     await downloadToFile(imageUrls[i], p);
 if (fs.statSync(p).size < 10_000) throw new Error(`image too small (likely invalid): ${p}`);
@@ -383,7 +383,7 @@ imagePaths.push(p);
   // 10~12분 목표: 기본 80초(=10분40초)
   // durationSec를 넘겨받으면 그걸 우선 사용해도 되지만,
   // 현재 기준선은 10~12분 고정이므로 80초로 고정 운영.
-  const TARGET_IMAGES = 8; // 현재 이미지 개수와 동일
+  const TARGET_IMAGES = 40; // 현재 이미지 개수와 동일
 const perImageSec = Math.max(6, Math.floor((durationSec || 600) / TARGET_IMAGES));
 
   const slideVideoPath = path.join(os.tmpdir(), `finishflow-${id}-slides.mp4`);
