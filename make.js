@@ -371,6 +371,9 @@ const title = t.chosenTitle;
   const imageDir = path.join(os.tmpdir(), `finishflow-images-${id}`);
   fs.mkdirSync(imageDir, { recursive: true });
 
+const TARGET_IMAGES = 40;
+const perImageSec = Math.max(6, Math.floor((durationSec || 600) / TARGET_IMAGES));
+
   const imagePaths = [];
 
 if (!Array.isArray(imageUrls) || imageUrls.length === 0) {
@@ -388,9 +391,7 @@ for (let i = 0; i < TARGET_IMAGES; i++) {
   // 10~12분 목표: 기본 80초(=10분40초)
   // durationSec를 넘겨받으면 그걸 우선 사용해도 되지만,
   // 현재 기준선은 10~12분 고정이므로 80초로 고정 운영.
-  const TARGET_IMAGES = 40; // 현재 이미지 개수와 동일
-const perImageSec = Math.max(6, Math.floor((durationSec || 600) / TARGET_IMAGES));
-
+  
   const slideVideoPath = path.join(os.tmpdir(), `finishflow-${id}-slides.mp4`);
   const outMp4Path = path.join(outDir, `${id}.mp4`);
 
