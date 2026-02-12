@@ -295,8 +295,6 @@ async function callResponses(userText) {
 
   throw new Error("Failed to generate sufficiently long script");
 }
-  
-}
 
 async function safeMakeScript(req) {
   const topic = typeof req.topic === "string" ? req.topic.trim() : "";
