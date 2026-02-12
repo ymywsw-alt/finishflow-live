@@ -309,8 +309,10 @@ const raw = await callResponses(prefix + userText);
   let parsed = null;
   try { parsed = JSON.parse(raw); } catch (_) { parsed = { script: raw }; }
 
-  const script = typeof parsed?.script === "string" ? parsed.script.trim() : String(raw || "").trim();
-  if (!script) throw new Error("Empty script from OpenAI");
+  const script = typeof parsed?.script === "string" ? parsed.script : "";
+console.log("SCRIPT LENGTH:", script.length);
+
+if (!script) throw new Error("Empty script from OpenAI");
 
   return {
     ok: true,
@@ -343,14 +345,20 @@ async function generateTTSMp3({ id, script, outDir }) {
 
   // TTS (Audio API /v1/audio/speech)
   const audioBuf = await openaiBinary("https://api.openai.com/v1/audio/speech", {
-    model: "gpt-4o-mini-tts",
-    voice: "alloy",
-    format: "mp3",
-    input: script,
-  });
+  model: "gpt-4o-mini-tts",
+  voice: "alloy",
+  format: "mp3",
+  input: script,
+});
 
-  fs.writeFileSync(outMp3Path, audioBuf);
-  return outMp3Path;
+console.log("TTS BYTES:", audioBuf?.length || 0);
+
+fs.writeFileSync(outMp3Path, audioBuf);
+
+console.log("AUDIO FILE CREATED:", outMp3Path);
+
+return outMp3Path;
+
 }
 
 // ----------- VIDEO (slideshow, deterministic) -----------
