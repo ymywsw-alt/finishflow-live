@@ -260,6 +260,7 @@ async function openaiBinary(url, payload) {
 async function callResponses(userText) {
   const MIN_SCRIPT_CHARS = 7000;
   const MAX_TRIES = 6;
+let lastLen = 0;
 
   for (let i = 1; i <= MAX_TRIES; i++) {
     const hardSpec =
@@ -320,13 +321,14 @@ const text = pickText(d);
 console.log("TEXT PICKED LEN:", text.length);
 
     console.log("SCRIPT LENGTH:", text.length);
+lastLen = text.length;
 
     if (text.length >= MIN_SCRIPT_CHARS) {
       return text;
     }
   }
 
-  throw new Error("Failed to generate sufficiently long script");
+  throw new Error(`Failed to generate sufficiently long script (lastLen=${lastLen}, min=${MIN_SCRIPT_CHARS})`);
 }
 
 async function safeMakeScript(req) {
