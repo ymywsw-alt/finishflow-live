@@ -259,41 +259,75 @@ async function openaiBinary(url, payload) {
 // ---------- LLM script ----------
 async function callResponses(userText) {
   const MIN_SCRIPT_CHARS = 7000;
-  const MAX_TRIES = 5;
-
-  let text = "";
+  const MAX_TRIES = 6;
 
   for (let i = 1; i <= MAX_TRIES; i++) {
+    const hardSpec =
+      `\n\n[필수 조건]\n` +
+      `- 출력은 반드시 '한국어 보이스오버 대본'만.\n` +
+      `- 최소 ${MIN_SCRIPT_CHARS}자 이상.\n` +
+      `- 10~12분 분량(중년/시니어가 천천히 읽는 속도 기준).\n` +
+      `- 아래 4블록을 반드시 포함:\n` +
+      `  1) 훅(10~15초)\n` +
+      `  2) 쉬운 설명(초등 수준)\n` +
+      `  3) 사례 3개(실제 상황처럼)\n` +
+      `  4) 체크리스트 10개 + 오늘 할 행동 5단계\n` +
+      `- 절대 요약하지 말고, 설명/예시/비유/대화체로 길이를 확보.\n` +
+      `- 마지막에 '오늘 바로 할 1가지'를 한 문장으로 고정.\n`;
 
-    const retryHint =
-      i === 1 ? "" :
-      "\n\n[재작성 지시]\n" +
-      "- 이전 대본은 너무 짧았습니다.\n" +
-      "- 최소 7000자 이상, 10~12분 분량으로 작성하세요.\n" +
-      "- 사례, 설명, 체크리스트를 충분히 포함하세요.\n";
+    const retryNudge =
+      i === 1
+        ? ""
+        : `\n\n[재작성]\n이전 대본이 너무 짧았습니다. 반드시 ${MIN_SCRIPT_CHARS}자 이상으로 더 길고 구체적으로 다시 작성하세요.\n`;
 
-const prompt = userText + retryHint;
+    const prompt = userText + retryNudge + hardSpec;
+
+    console.log("PROMPT LEN:", prompt.length, "TRY:", i);
+
+    const prompt = userText + retryHint;
 console.log("PROMPT LEN:", prompt.length, "TRY:", i);
-    
-  const d = await openaiJSON("https://api.openai.com/v1/responses", {
-    model: "gpt-4.1-mini",
-    max_output_tokens: 9000,
-    input: [
-      { role: "system", content: SYSTEM },
-      { role: "user", content: prompt },
-    ],
-  });
- text =
-      (d.output_text || "").trim() ||
-      (d.output?.[0]?.content?.find(c => c.type === "output_text")?.text || "").trim();
+
+const d = await openaiJSON("https://api.openai.com/v1/responses", {
+  model: "gpt-4.1-mini",
+  max_output_tokens: 9000,
+  input: [
+    { role: "system", content: SYSTEM },
+    { role: "user", content: prompt },
+  ],
+});
+
+    const pickText = (obj) => {
+  if (typeof obj?.output_text === "string" && obj.output_text.trim()) return obj.output_text.trim();
+
+  const c1 = obj?.output?.[0]?.content;
+  if (Array.isArray(c1)) {
+    const t = c1.find(x => x?.type === "output_text");
+    if (t && typeof t.text === "string" && t.text.trim()) return t.text.trim();
+
+    for (const x of c1) {
+      if (typeof x?.text === "string" && x.text.trim()) return x.text.trim();
+      if (typeof x?.content === "string" && x.content.trim()) return x.content.trim();
+      if (Array.isArray(x?.content)) {
+        for (const y of x.content) {
+          if (typeof y?.text === "string" && y.text.trim()) return y.text.trim();
+        }
+      }
+    }
+  }
+
+  const m = obj?.choices?.[0]?.message?.content;
+  if (typeof m === "string" && m.trim()) return m.trim();
+
+  return "";
+};
+
+const text = pickText(d);
 
     console.log("SCRIPT LENGTH:", text.length);
 
     if (text.length >= MIN_SCRIPT_CHARS) {
       return text;
     }
-
-    console.log(`Retry script generation ${i}/${MAX_TRIES}`);
   }
 
   throw new Error("Failed to generate sufficiently long script");
