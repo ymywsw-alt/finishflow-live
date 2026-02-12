@@ -314,7 +314,7 @@ console.log("PROMPT_HEAD:", lastPromptHead);
 
 const d = await openaiJSON("https://api.openai.com/v1/responses", {
   model: "gpt-4.1-mini",
-  max_output_tokens: 9000,
+  max_output_tokens: 16000,
   input: [
     { role: "system", content: SYSTEM },
     { role: "user", content: prompt },
@@ -348,8 +348,15 @@ console.log("RESP_SNIP:", JSON.stringify(d).slice(0, 800));
 
   return JSON.stringify(obj).slice(0, 2000);
 };
-const text = pickText(d);
-console.log("TEXT PICKED LEN:", text.length);
+351 const text = pickText(d);
+352 console.log("TEXT PICKED LEN:", text.length);
+
+353 const isJsonFallback = text.trim().startsWith("{") || text.trim().startsWith("[");
+354 console.log("TEXT_IS_JSON_FALLBACK:", isJsonFallback);
+355 console.log("TEXT_HEAD:", text.slice(0, 180).replace(/\s+/g, " "));
+
+356 console.log("SCRIPT LENGTH:", text.length);
+357 lastLen = text.length;
 
     console.log("SCRIPT LENGTH:", text.length);
 lastLen = text.length;
