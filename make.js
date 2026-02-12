@@ -272,12 +272,15 @@ async function callResponses(userText) {
       "- 최소 7000자 이상, 10~12분 분량으로 작성하세요.\n" +
       "- 사례, 설명, 체크리스트를 충분히 포함하세요.\n";
 
+const prompt = userText + retryHint;
+console.log("PROMPT LEN:", prompt.length, "TRY:", i);
+    
   const d = await openaiJSON("https://api.openai.com/v1/responses", {
     model: "gpt-4.1-mini",
     max_output_tokens: 9000,
     input: [
       { role: "system", content: SYSTEM },
-      { role: "user", content: userText + retryHint },
+      { role: "user", content: prompt },
     ],
   });
  text =
