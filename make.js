@@ -258,15 +258,43 @@ async function openaiBinary(url, payload) {
 
 // ---------- LLM script ----------
 async function callResponses(userText) {
+  const MIN_SCRIPT_CHARS = 7000;
+  const MAX_TRIES = 5;
+
+  let text = "";
+
+  for (let i = 1; i <= MAX_TRIES; i++) {
+
+    const retryHint =
+      i === 1 ? "" :
+      "\n\n[재작성 지시]\n" +
+      "- 이전 대본은 너무 짧았습니다.\n" +
+      "- 최소 7000자 이상, 10~12분 분량으로 작성하세요.\n" +
+      "- 사례, 설명, 체크리스트를 충분히 포함하세요.\n";
+
   const d = await openaiJSON("https://api.openai.com/v1/responses", {
     model: "gpt-4.1-mini",
-    max_output_tokens: 900,
+    max_output_tokens: 9000,
     input: [
       { role: "system", content: SYSTEM },
-      { role: "user", content: userText },
+      { role: "user", content: userText + retryHint },
     ],
   });
+ text =
+      (d.output_text || "").trim() ||
+      (d.output?.[0]?.content?.find(c => c.type === "output_text")?.text || "").trim();
 
+    console.log("SCRIPT LENGTH:", text.length);
+
+    if (text.length >= MIN_SCRIPT_CHARS) {
+      return text;
+    }
+
+    console.log(`Retry script generation ${i}/${MAX_TRIES}`);
+  }
+
+  throw new Error("Failed to generate sufficiently long script");
+}
   const out =
     (d.output_text || "").trim() ||
     (d.output?.[0]?.content?.find((c) => c.type === "output_text")?.text || "").trim();
