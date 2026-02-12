@@ -289,7 +289,14 @@ async function safeMakeScript(req) {
   `tone: ${topicTone}\n` +
   `seconds: ${durationSec}\n` +
   `Write a Korean voiceover script.\n` +
-  `Script must be 10-12 minutes when read aloud (at least 2200 Korean characters).\n` +
+  'Write a LONG and detailed Korean voiceover script.\n' +
+'Minimum length: 2500 Korean characters.\n' +
+'Structure the script with:\n' +
+'1. Opening hook\n' +
+'2. Explanation\n' +
+'3. Practical tips\n' +
+'4. Closing summary\n' +
+'Do not shorten the content.\n' +
   `Return JSON only in schema {"script":"..."}.\n` +
   `No markdown.`;
   
