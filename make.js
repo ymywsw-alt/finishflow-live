@@ -590,7 +590,6 @@ execSync(slideCmd, { stdio: "inherit" });
 
 // ---------- entry ----------
 (async () => {
-  const t0 = Date.now();
   try {
     const req = JSON.parse(fs.readFileSync("req.json", "utf-8"));
 
@@ -599,11 +598,14 @@ execSync(slideCmd, { stdio: "inherit" });
 
     const outDir = path.resolve(process.cwd(), "out", id);
     ensureDir(outDir);
-// bg.jpg를 작업 폴더로 복사
-const bgSrc = path.resolve(process.cwd(), "bg.jpg");
-const bgDst = path.join(outDir, "bg.jpg");
-if (!fs.existsSync(bgSrc)) throw new Error(`bg.jpg missing at ${bgSrc}`);
-fs.copyFileSync(bgSrc, bgDst);
+
+    // bg-jpg를 쓰는 경우만 유지(없으면 이 블록은 네 기존 로직에 맞춰 조정)
+    const bgJpg = path.resolve(process.cwd(), "bg-jpg");
+    if (!fs.existsSync(bgJpg)) throw new Error(`bg-jpg missing at ${bgJpg}`);
+
+    const bgSrc = path.resolve(process.cwd(), "bg-jpg");
+    const bgDst = path.join(outDir, "bg-jpg");
+    fs.copyFileSync(bgSrc, bgDst);
 
     const ttsPath = await generateTTSMp3({ id, script, outDir });
     log("ttsPath:", ttsPath);
@@ -614,27 +616,23 @@ fs.copyFileSync(bgSrc, bgDst);
     r.parsed.tts_path = ttsPath;
     r.parsed.video_path = videoPath;
 
-    // stdout 단 1회
+    // stdout 반환
     out({
       ok: true,
       parsed: r.parsed,
       download_url: `/download?token=${id}`,
-
-      ms: Date.now() - t0
+      ms: Date.now() - t0,
     });
-
   } catch (e) {
     const info = briefErr(e);
     log("FAIL:", info);
 
-    // stdout 단 1회
     out({
       ok: false,
       error: info,
-      ms: Date.now() - t0
+      ms: Date.now() - t0,
     });
 
     process.exitCode = 1;
   }
 })();
-
