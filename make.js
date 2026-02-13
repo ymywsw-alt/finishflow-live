@@ -322,6 +322,9 @@ const d = await openaiJSON("https://api.openai.com/v1/responses", {
 });
     
 console.log("RESP_KEYS:", Object.keys(d || {}));
+console.log("RESP_SNIP:", JSON.stringify(d).slice(0, 1200));
+   
+console.log("RESP_KEYS:", Object.keys(d || {}));
 console.log("RESP_SNIP:", JSON.stringify(d).slice(0, 800));
 
     const pickText = (obj) => {
