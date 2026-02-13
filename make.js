@@ -204,30 +204,44 @@ async function makeTitle(topic) {
 async function generateScript(topic) {
   const title = await makeTitle(topic);
 
-  for (let i = 1; i <= MAX_TRIES; i++) {
-    const retryNudge =
-  i === 1
-    ? ""
-    : `\n[재작성 강제]\n이전 출력은 길이가 부족했다.\n반드시 같은 출력 안에서 ${MIN_SCRIPT_CHARS}자 이상이 될 때까지 이어서 작성하라.\n특히 사례/체크리스트/오해-실수/행동 항목을 확장해서 분량을 확보하라.\n`;
+  const basePrompt =
+    `주제: ${topic}\n제목: ${title}\n` +
+    `요청: 한국어 내레이션 대본을 작성하라.\n` +
+    `최종 길이는 반드시 ${MIN_SCRIPT_CHARS}자 이상.\n\n` +
+    buildHardSpec(topic, title);
 
+  // 1) first draft
+  let script = String(await callResponses(basePrompt, 16000) || "").trim();
+  log("SCRIPT_LEN:", script.length, "phase=first");
 
-    const prompt =
-      `주제: ${topic}\n제목: ${title}\n` +
-      `요청: ${MIN_SCRIPT_CHARS}자 이상 한국어 내레이션 대본을 작성하라.\n` +
-      retryNudge +
-      buildHardSpec(topic, title);
+  // 2) continue writing if too short (accumulate)
+  for (let k = 1; k <= 3 && script.length < MIN_SCRIPT_CHARS; k++) {
+    const need = MIN_SCRIPT_CHARS - script.length;
 
-    const raw = await callResponses(prompt, 16000);
-    const text = String(raw || "").trim();
+    const contPrompt =
+      `[이어쓰기 ${k}]\n` +
+      `아래 대본은 아직 글자 수가 부족하다. (${script.length}자)\n` +
+      `반드시 같은 톤/형식으로 "중간부터 이어서" 작성하라.\n` +
+      `절대 반복/요약하지 말고, 새로운 내용으로 확장하라.\n` +
+      `추가로 최소 ${Math.max(1200, Math.min(2500, need + 600))}자 이상을 더 작성하라.\n` +
+      `※ ${MIN_SCRIPT_CHARS}자 달성 전에는 마무리/결론 문장을 쓰지 마라.\n\n` +
+      `--- 기존 대본(끝부분 참고) ---\n` +
+      script.slice(Math.max(0, script.length - 1200)) +
+      `\n--- 여기서부터 이어쓰기 ---\n`;
 
-    log("SCRIPT_LEN:", text.length, "try=", i);
+    const add = String(await callResponses(contPrompt, 16000) || "").trim();
 
-    if (text.length >= MIN_SCRIPT_CHARS) {
-      return { title, script: text };
-    }
+    // append with spacing
+    if (add) script = (script + "\n\n" + add).trim();
+
+    log("SCRIPT_LEN:", script.length, `phase=cont${k}`);
   }
 
-  throw new Error(`Failed to generate sufficiently long script (min=${MIN_SCRIPT_CHARS})`);
+  if (script.length < MIN_SCRIPT_CHARS) {
+    throw new Error(`Failed to generate sufficiently long script (min=${MIN_SCRIPT_CHARS})`);
+  }
+
+  return { title, script };
 }
 
 // =========================
