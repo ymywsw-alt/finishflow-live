@@ -315,7 +315,7 @@ let lastPromptHead = "";
 [09_FAQ] (최소 700자)
 - 시니어가 진짜로 물어볼 질문 6개 + 답변(각 2~4문장).
 
-[10_WRAP] (최소 300자, 단 7000자 달성 이후에만)
+[10_WRAP] (최소 300자, 단 6000자 달성 이후에만)
 - 오늘 핵심 1문장 요약 + 부담 없는 마무리(구독/좋아요 같은 말은 넣지 말 것).
 
 3) 리텐션(이탈 방지) 규칙 — 3회 강제 삽입
@@ -331,7 +331,7 @@ let lastPromptHead = "";
 
 5) 금지 규칙 (중요)
 - “저는 AI입니다”, “모델”, “토큰”, “출력” 등 메타 발언 금지.
-- “요약하면/결론적으로/마무리하겠습니다”를 7000자 달성 전에 쓰지 마라.
+- “요약하면/결론적으로/마무리하겠습니다”를 6000자 달성 전에 쓰지 마라.
 - 글자 수를 직접 세거나 숫자를 출력하지 마라. (예: “지금 6,500자입니다” 금지)
 - 리스트만 잔뜩 나열하고 설명 없이 끝내지 마라.
 
@@ -438,7 +438,7 @@ async function safeMakeScript(req) {
 `tone: ${topicTone}\n` +
 `seconds: ${durationSec}\n` +
 `Write a LONG and detailed Korean voiceover script.\n` +
-`Minimum length: 7000 Korean characters.\n` +
+`Minimum length: 6000 Korean characters.\n` +
 `The script must take 10-12 minutes when read aloud.\n` +
 `Structure the script with:\n` +
 `1. Opening hook\n` +
@@ -461,7 +461,7 @@ const raw = await callResponses(prefix + userText);
   const script = typeof parsed?.script === "string" ? parsed.script : "";
 console.log("SCRIPT LENGTH:", script.length);
 
-  const MIN_SCRIPT_CHARS = 7000;
+  const MIN_SCRIPT_CHARS = 6000;
 if (script.length < MIN_SCRIPT_CHARS) {
   throw new Error(`Script too short: ${script.length} (min ${MIN_SCRIPT_CHARS})`);
 }
