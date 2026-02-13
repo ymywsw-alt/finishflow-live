@@ -415,10 +415,11 @@ lastLen = text.length;
     if (text.length >= MIN_SCRIPT_CHARS) {
       return text;
     }
-  }
 
-  throw new Error(
-  `Failed to generate sufficiently long script (lastLen=${lastLen}, min=${MIN_SCRIPT_CHARS}, promptLen=${lastPromptLen})`
+const preview = String(text || "").slice(0, 400);
+
+throw new Error(
+  `Failed to generate sufficiently long script (lastLen=${lastLen}, min=${MIN_SCRIPT_CHARS}, promptLen=${lastPromptLen}) preview=${JSON.stringify(preview)}`
 );
 }
 
