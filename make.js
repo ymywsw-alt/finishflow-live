@@ -572,16 +572,30 @@ async function generateHotTopics(seedTopic, count, ageBucket) {
   return anchored.slice(0, Math.max(10, n));
 }
 function forceHook(topic, hook) {
-  if (!hook || hook.length < 10) {
-    return `${topic}, 지금 방치하면 위험합니다.`;
+  const t = String(topic || "").trim();
+
+  // 약한 hook이거나 짧으면 강제 생성
+  if (!hook || hook.length < 14) {
+    return `${t}, 방치하면 6개월 안에 몸이 크게 망가질 수 있습니다.`;
   }
 
-  // 약한 패턴 필터
-  const weakWords = ["중요합니다", "알아보겠습니다", "소개합니다", "설명합니다"];
+  // 약한 표현 필터
+  const weakWords = [
+    "중요합니다",
+    "알아보겠습니다",
+    "소개합니다",
+    "설명합니다",
+    "필요합니다",
+    "도움이 됩니다"
+  ];
+
   const weak = weakWords.some(w => hook.includes(w));
 
-  if (weak) {
-    return `${topic}, 대부분이 모르는 위험 신호가 있습니다.`;
+  // 숫자/시간이 없는 경우도 강화
+  const hasNumberOrTime = /\d|개월|주|일|년|시간/.test(hook);
+
+  if (weak || !hasNumberOrTime) {
+    return `${t}, 대부분이 모르는 위험 신호가 3가지 있습니다.`;
   }
 
   return hook;
