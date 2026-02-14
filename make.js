@@ -491,24 +491,32 @@ function parseShortsBlock(text) {
 // Topic “터지는 주제” 생성: 주제 10개 뽑고, 그중 N개 사용
 async function generateHotTopics(seedTopic, count, ageBucket) {
   const tpl = ageBucketTemplate(ageBucket);
-  const prompt = `
-목표: 유튜브 쇼츠에서 클릭/시청 유지가 잘 나오는 "주제 후보"만 생성.
-조건:
-- 과장/허위 단정 금지.
-- 건강/재테크는 단정적 처방 금지.
-- ${tpl.driver}에 맞는 훅이 나오는 주제.
-- 각 주제는 18자 이내(짧게).
 
-시드 주제(있으면 참고): ${seedTopic || "없음"}
+  // seedTopic must dominate
+  const core = String(seedTopic || "").trim();
+  if (!core) throw new Error("seedTopic (topic) is required");
+
+  const n = Math.max(5, Number(count) || 10);
+
+  const prompt = `
+목표: "${core}" 주제에 100% 고정된 유튜브 쇼츠용 '파생 주제'만 생성한다.
+조건:
+- 반드시 "${core}"와 직접 관련되어야 한다. (무관한 주제 금지)
+- "${core}"에서 벗어나는 요리/여행/DIY/개그 등 랜덤 주제 생성 금지.
+- ${tpl.driver}에 맞는 훅이 나오는 파생 주제.
+- 각 주제는 18자 이내, 한국어, 간결.
+- 과장/허위 단정 금지. 건강은 일반 정보 수준.
+- 결과는 중복 없이.
 
 출력 형식:
-- 주제만, 줄바꿈으로 20개.
+- 주제만 줄바꿈으로 ${Math.max(12, n)}개
+- 번호/기호/설명/부연 금지 (주제 텍스트만)
 `.trim();
 
   const raw = await callResponses(
     prompt,
-    1200,
-    "You generate Korean short-video topics. Output only topics line by line, no numbering, no extra text."
+    1400,
+    "You generate Korean short-video derivative topics. Output ONLY topic lines, no numbering, no extra text."
   );
 
   const lines = String(raw || "")
@@ -518,21 +526,50 @@ async function generateHotTopics(seedTopic, count, ageBucket) {
     .map(s => s.replace(/^[\-\*\d\.\)\s]+/, "").trim())
     .filter(Boolean);
 
-  // Deduplicate and slice
+  // filter: must include core keyword tokens (loose)
+  const mustTokens = core
+    .split(/\s+/)
+    .map(t => t.trim())
+    .filter(Boolean)
+    .slice(0, 3); // keep it robust
+
   const uniq = [];
   const seen = new Set();
-  for (const x of lines) {
+
+  for (const x0 of lines) {
+    const x = x0.slice(0, 30);
     const k = x.toLowerCase();
     if (seen.has(k)) continue;
+
+    // Must be related: contains at least one token from core (or core itself)
+    const ok =
+      x.includes(core) ||
+      mustTokens.some(t => t && x.includes(t));
+
+    if (!ok) continue;
+
     seen.add(k);
-    uniq.push(x.slice(0, 30));
+    uniq.push(x);
+    if (uniq.length >= Math.max(10, n)) break;
   }
 
-  // Ensure at least count
-  while (uniq.length < Math.max(5, count)) {
-    uniq.push(`${seedTopic || "핵심 습관"} 변형 ${uniq.length + 1}`);
+  // Ensure enough: force-generate safe derivatives if model under-produces
+  while (uniq.length < Math.max(10, n)) {
+    const i = uniq.length + 1;
+    const fallback = `${core} 꿀팁 ${i}`;
+    const k = fallback.toLowerCase();
+    if (!seen.has(k)) {
+      seen.add(k);
+      uniq.push(fallback.slice(0, 18));
+    } else {
+      uniq.push(`${core} 체크 ${i}`.slice(0, 18));
+    }
   }
-  return uniq.slice(0, Math.max(count, 10));
+
+  // Always include the core as the first candidate (fixed anchor)
+  const anchored = [core, ...uniq.filter(t => t !== core)];
+
+  return anchored.slice(0, Math.max(10, n));
 }
 
 async function generateOneShort({ topic, ageBucket, idx, seedHint }) {
