@@ -32,6 +32,11 @@ const t0 = Date.now();
 function safeJson(x) { try { return JSON.parse(x); } catch { return null; } }
 function must(v, name) { if (!v) throw new Error(`Missing required: ${name}`); return v; }
 function ensureDir(p) { if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true }); }
+function clampInt(n, lo, hi, defVal) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return defVal;
+  return Math.max(lo, Math.min(hi, Math.floor(x)));
+}
 function briefErr(e) {
   return {
     message: e?.message || String(e),
@@ -131,24 +136,24 @@ function pickText(resp) {
   return JSON.stringify(resp);
 }
 
-async function callResponses(userText, maxTokens = 16000) {
+async function callResponses(userText, maxTokens = 4000, systemText = null) {
   if (!OPENAI_API_KEY) throw new Error("OPENAI_API_KEY missing on finishflow-live");
+  const sys = systemText || "You are a Korean content writer. Follow all constraints exactly.";
   const d = await openaiJSON("https://api.openai.com/v1/responses", {
     model: "gpt-4o-mini",
     max_output_tokens: maxTokens,
     input: [
-      { role: "system", content: "You are a Korean voiceover script writer for seniors. Follow the HARD SPEC exactly." },
+      { role: "system", content: sys },
       { role: "user", content: userText },
     ],
   });
   return pickText(d);
 }
 
-// =========================
-// Script generation (retry 2)
-// =========================
+// =====================================================
+// LONGFORM (existing) — keep as-is (minimal changes)
+// =====================================================
 const MIN_SCRIPT_CHARS = 6000;
-const MAX_TRIES = 3;
 
 function buildHardSpec(topic, title) {
   return `
@@ -191,11 +196,11 @@ function buildHardSpec(topic, title) {
 `.trim();
 }
 
-
 async function makeTitle(topic) {
   const raw = await callResponses(
     `주제: ${topic}\n\n시니어 유튜브용 제목을 5개 후보로 제시하고, 첫 줄에 가장 좋은 1개를 출력해라.\n형식: 1줄 제목만.`,
-    800
+    800,
+    "You are a Korean YouTube title writer for seniors. Output only one title line."
   );
   const first = String(raw || "").split("\n").map(s => s.trim()).filter(Boolean)[0] || topic;
   return first.slice(0, 60);
@@ -211,7 +216,11 @@ async function generateScript(topic) {
     buildHardSpec(topic, title);
 
   // 1) first draft
-  let script = String(await callResponses(basePrompt, 16000) || "").trim();
+  let script = String(await callResponses(
+    basePrompt,
+    16000,
+    "You are a Korean voiceover script writer for seniors. Follow the HARD SPEC exactly."
+  ) || "").trim();
   log("SCRIPT_LEN:", script.length, "phase=first");
 
   // 2) continue writing if too short (accumulate)
@@ -229,11 +238,13 @@ async function generateScript(topic) {
       script.slice(Math.max(0, script.length - 1200)) +
       `\n--- 여기서부터 이어쓰기 ---\n`;
 
-    const add = String(await callResponses(contPrompt, 16000) || "").trim();
+    const add = String(await callResponses(
+      contPrompt,
+      16000,
+      "You are a Korean voiceover script writer for seniors. Continue the script without repeating."
+    ) || "").trim();
 
-    // append with spacing
     if (add) script = (script + "\n\n" + add).trim();
-
     log("SCRIPT_LEN:", script.length, `phase=cont${k}`);
   }
 
@@ -245,7 +256,7 @@ async function generateScript(topic) {
 }
 
 // =========================
-// TTS
+// TTS (existing)
 // =========================
 async function generateTTSMp3({ id, script, outDir }) {
   must(id, "id");
@@ -268,7 +279,7 @@ async function generateTTSMp3({ id, script, outDir }) {
 }
 
 // =========================
-// Images (Pixabay recommended, else fail fast)
+// Images (existing - Pixabay required)
 // =========================
 async function fetchJson(url, headers = {}) {
   const r = await fetch(url, { headers });
@@ -296,7 +307,6 @@ async function collectImageUrls(query) {
     throw new Error("No image sources available. Set PIXABAY_API_KEY (recommended).");
   }
 
-  // ensure 40
   while (urls.length < 40) urls.push(urls[urls.length % Math.max(1, urls.length)]);
   return urls.slice(0, 40);
 }
@@ -322,13 +332,12 @@ async function downloadToFile(url, outPath) {
 }
 
 // =========================
-// Video: slideshow length = audio length (sync)
+// Video: slideshow length = audio length (existing)
 // =========================
 async function getMp3DurationSec(mp3Path) {
-  // ffprobe output seconds
   const cmd = `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${mp3Path}"`;
-  const out = execSync(cmd, { encoding: "utf8" }).trim();
-  const sec = Math.max(1, Math.round(Number(out) || 0));
+  const outp = execSync(cmd, { encoding: "utf8" }).trim();
+  const sec = Math.max(1, Math.round(Number(outp) || 0));
   return sec;
 }
 
@@ -353,7 +362,6 @@ async function makeVideo({ id, ttsPath, outDir, topic }) {
     imagePaths.push(p);
   }
 
-  // distribute duration across images
   const perImageSec = Math.max(2, Math.floor(durationSec / imagePaths.length));
   const listPath = path.join(os.tmpdir(), `finishflow-${id}-list.txt`);
   const lines = [];
@@ -383,26 +391,265 @@ async function makeVideo({ id, ttsPath, outDir, topic }) {
   return { outMp4Path, durationSec };
 }
 
-// =========================
-// main
-// =========================
+// =====================================================
+// SHORTS ENGINE (NEW) — 30s shorts scripts + Luma prompt
+// =====================================================
+
+// Generation templates per age bucket (from your baseline)
+function ageBucketTemplate(ageBucket) {
+  const b = String(ageBucket || "").trim();
+  switch (b) {
+    case "10s":
+      return { bucket: "10s", driver: "공감/소속감", tone: "가볍고 빠르게, 밈/공감 포인트", cta: "댓글로 공감/경험 공유" };
+    case "20s":
+      return { bucket: "20s", driver: "가성비/정보", tone: "핵심만, 수치/비교", cta: "저장/공유/꿀팁 요청" };
+    case "30_40s":
+      return { bucket: "30_40s", driver: "건강/시간절약/현실이득", tone: "현실 조언, 시간 아끼는 포인트", cta: "내 상황 댓글/체크" };
+    case "50p":
+      return { bucket: "50p", driver: "건강정보/경고/신뢰", tone: "차분하지만 단호, 안전/주의", cta: "본인 상황 1번/2번 선택 댓글" };
+    default:
+      return { bucket: "auto", driver: "혼합", tone: "명확/간결", cta: "선택형 질문 댓글" };
+  }
+}
+
+// Policy-safe constraints for monetization stability (no explicit guideline quotes)
+function policyGuardrails() {
+  return `
+[정책/수익 안전 가드레일]
+- 혐오/차별/폭력 조장/성적 콘텐츠/불법행위/위험행위 유도 금지.
+- 과도한 공포 조장(극단적 단정, 위협) 금지. 다만 '주의/경고'는 사실 기반으로.
+- 건강/의학은 "일반 정보" 수준. 진단/처방 단정 금지. 필요 시 "의심되면 전문가 상담" 한 문장 허용.
+- 허위 사실처럼 단정 금지. 모르는 수치는 "대략/일반적으로" 처리.
+- 유명인/상표를 과도하게 끌어오지 말 것.
+- 노래 가사/저작권 문구/기사 전문 인용 금지.
+`.trim();
+}
+
+function shortsHardSpec(topic, tpl, idx, seedHint) {
+  return `
+[SHORTS HARD SPEC - MUST FOLLOW]
+목표: 30초 쇼츠. 스와이프 방지 + 반복 재생(루프) + 댓글 유도 포함.
+
+주제: ${topic}
+타겟: ${tpl.bucket} (${tpl.driver})
+톤: ${tpl.tone}
+콜투액션 방향: ${tpl.cta}
+추가 힌트(있으면 반영): ${seedHint || "없음"}
+버전: #${idx}
+
+[구조(초 단위)]
+- 0~2초: 강한 후크(1문장) + 첫 프레임 자막(7~12자)
+- 3~20초: 핵심 내용(3~5문장, 최대한 구체)
+- 20~30초: 행동 유도 + 루프 문장(마지막 문장이 첫 문장으로 자연 연결)
+
+[반드시 포함]
+1) 스와이프 방지 장치: "30초 뒤 공개/끝에 한 가지/방금 말한 것의 함정" 같은 리텐션 장치 1개
+2) 무한 루프: 마지막 문장 → 첫 문장 자연 연결
+3) 댓글 유도: 마지막 2초에 "선택형 질문" 1개
+
+[출력 형식(JSON 금지)]
+아래 라벨을 그대로 쓰고, 각 항목은 한 줄 또는 짧은 문단:
+HOOK:
+TOP_TEXT:
+SFX_START:
+BODY:
+CTA_LOOP:
+COMMENT_Q:
+LUMA_PROMPT:
+RUNWAY_PROMPT:
+
+[영상 프롬프트 규칙]
+- 세로 9:16, 고해상도, 리얼/시네마틱 중 선택
+- 첫 프레임 강한 장면. 자막 얹기 쉬운 여백 고려.
+- 과도한 폭력/의료 시술/선정/혐오 묘사 금지.
+
+${policyGuardrails()}
+[END SHORTS HARD SPEC]
+`.trim();
+}
+
+function parseShortsBlock(text) {
+  const t = String(text || "");
+  const get = (label) => {
+    const re = new RegExp(`${label}:\\s*([\\s\\S]*?)(?=\\n[A-Z_]+:|$)`, "m");
+    const m = t.match(re);
+    return (m?.[1] || "").trim();
+  };
+  return {
+    hook: get("HOOK"),
+    top_text: get("TOP_TEXT"),
+    sfx_start: get("SFX_START"),
+    body: get("BODY"),
+    cta_loop: get("CTA_LOOP"),
+    comment_q: get("COMMENT_Q"),
+    luma_prompt: get("LUMA_PROMPT"),
+    runway_prompt: get("RUNWAY_PROMPT"),
+    raw: t.trim(),
+  };
+}
+
+// Topic “터지는 주제” 생성: 주제 10개 뽑고, 그중 N개 사용
+async function generateHotTopics(seedTopic, count, ageBucket) {
+  const tpl = ageBucketTemplate(ageBucket);
+  const prompt = `
+목표: 유튜브 쇼츠에서 클릭/시청 유지가 잘 나오는 "주제 후보"만 생성.
+조건:
+- 과장/허위 단정 금지.
+- 건강/재테크는 단정적 처방 금지.
+- ${tpl.driver}에 맞는 훅이 나오는 주제.
+- 각 주제는 18자 이내(짧게).
+
+시드 주제(있으면 참고): ${seedTopic || "없음"}
+
+출력 형식:
+- 주제만, 줄바꿈으로 20개.
+`.trim();
+
+  const raw = await callResponses(
+    prompt,
+    1200,
+    "You generate Korean short-video topics. Output only topics line by line, no numbering, no extra text."
+  );
+
+  const lines = String(raw || "")
+    .split("\n")
+    .map(s => s.trim())
+    .filter(Boolean)
+    .map(s => s.replace(/^[\-\*\d\.\)\s]+/, "").trim())
+    .filter(Boolean);
+
+  // Deduplicate and slice
+  const uniq = [];
+  const seen = new Set();
+  for (const x of lines) {
+    const k = x.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    uniq.push(x.slice(0, 30));
+  }
+
+  // Ensure at least count
+  while (uniq.length < Math.max(5, count)) {
+    uniq.push(`${seedTopic || "핵심 습관"} 변형 ${uniq.length + 1}`);
+  }
+  return uniq.slice(0, Math.max(count, 10));
+}
+
+async function generateOneShort({ topic, ageBucket, idx, seedHint }) {
+  const tpl = ageBucketTemplate(ageBucket);
+  const spec = shortsHardSpec(topic, tpl, idx, seedHint);
+
+  const raw = await callResponses(
+    spec,
+    1400,
+    "You are a Korean Shorts scriptwriter. Follow the SHORTS HARD SPEC. Output only the labeled fields. No markdown, no JSON."
+  );
+
+  const parsed = parseShortsBlock(raw);
+
+  // Minimal validation (to reduce broken outputs)
+  if (!parsed.hook || !parsed.body || !parsed.cta_loop || !parsed.comment_q || !parsed.luma_prompt) {
+    // one retry with stricter instruction
+    const raw2 = await callResponses(
+      spec + "\n\n[재시도]\n위 라벨 8개를 빠짐없이 채워라. 빈칸 금지.",
+      1400,
+      "You are a Korean Shorts scriptwriter. Output only the labeled fields. No markdown, no JSON."
+    );
+    const parsed2 = parseShortsBlock(raw2);
+    return { ...parsed2, age_bucket: tpl.bucket, driver: tpl.driver };
+  }
+
+  return { ...parsed, age_bucket: tpl.bucket, driver: tpl.driver };
+}
+
+async function makeShortsPack({ seedTopic, count, ageBucket, seedHint }) {
+  // count: 1..100 (your baseline: 10 now, 100 soon)
+  const n = clampInt(count, 1, 100, 10);
+
+  // 1) Hot topics
+  const topics = await generateHotTopics(seedTopic, Math.max(10, n), ageBucket);
+  const picked = topics.slice(0, n);
+
+  // 2) Generate shorts one by one (stable)
+  const shorts = [];
+  for (let i = 0; i < picked.length; i++) {
+    const s = await generateOneShort({
+      topic: picked[i],
+      ageBucket,
+      idx: i + 1,
+      seedHint,
+    });
+    shorts.push({
+      idx: i + 1,
+      topic: picked[i],
+      ...s,
+    });
+  }
+
+  return { topics_candidate: topics, shorts };
+}
+
+// =====================================================
+// MAIN (mode switch)
+// =====================================================
 async function main() {
   const req = safeJson(fs.readFileSync("req.json", "utf-8")) || {};
+
+  const mode = String(req.mode || req.type || "longform").trim().toLowerCase();
   const topic = typeof req.topic === "string" ? req.topic.trim() : "";
+  const seedHint = typeof req.hint === "string" ? req.hint.trim() : "";
+  const ageBucket = typeof req.ageBucket === "string" ? req.ageBucket.trim() : "auto";
+  const count = req.count ?? req.n ?? 10;
+
   if (!topic) throw new Error("Missing topic in req.json");
 
   const id = crypto.randomBytes(6).toString("hex");
   const outDir = path.resolve(process.cwd(), "out", id);
   ensureDir(outDir);
 
+  // -------------------------
+  // SHORTS MODE (NEW)
+  // -------------------------
+  if (mode === "shorts" || mode === "short" || mode === "s") {
+    const pack = await makeShortsPack({
+      seedTopic: topic,
+      count,
+      ageBucket,
+      seedHint,
+    });
+
+    // Save an artifact for ops (optional but helpful)
+    const jsonPath = path.join(outDir, `${id}-shorts.json`);
+    fs.writeFileSync(jsonPath, JSON.stringify(pack, null, 2), "utf8");
+
+    return {
+      ok: true,
+      mode: "shorts",
+      parsed: {
+        id,
+        seedTopic: topic,
+        ageBucket,
+        count: clampInt(count, 1, 100, 10),
+        out_dir: outDir,
+        shorts_json: jsonPath,
+        ...pack,
+      },
+      // download_url kept for compatibility; for shorts it's a JSON artifact
+      download_url: `/download?token=${id}`,
+      ms: Date.now() - t0,
+    };
+  }
+
+  // -------------------------
+  // LONGFORM MODE (EXISTING)
+  // -------------------------
   const { title, script } = await generateScript(topic);
-
   const ttsPath = await generateTTSMp3({ id, script, outDir });
-
   const { outMp4Path, durationSec } = await makeVideo({ id, ttsPath, outDir, topic });
 
   return {
     ok: true,
+    mode: "longform",
     parsed: {
       id,
       title,
