@@ -571,7 +571,7 @@ async function generateHotTopics(seedTopic, count, ageBucket) {
 
   return anchored.slice(0, Math.max(10, n));
 }
-function forceHook(topic, hook) {
+
   const t = String(topic || "").trim();
 
   // 약한 hook이거나 짧으면 강제 생성
@@ -611,7 +611,6 @@ async function generateOneShort({ topic, ageBucket, idx, seedHint }) {
     "You are a Korean Shorts scriptwriter. Follow the SHORTS HARD SPEC. Output only the labeled fields. No markdown, no JSON."
   );
 const parsed = parseShortsBlock(raw);
-parsed.hook = forceHook(topic, parsed.hook);
 
   // Minimal validation (to reduce broken outputs)
   if (!parsed.hook || !parsed.body || !parsed.cta_loop || !parsed.comment_q || !parsed.luma_prompt) {
