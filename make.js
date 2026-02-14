@@ -618,6 +618,7 @@ async function generateOneShort({ topic, ageBucket, idx, seedHint }) {
     "You are a Korean Shorts scriptwriter. Follow the SHORTS HARD SPEC. Output only the labeled fields. No markdown, no JSON."
   );
 const parsed = parseShortsBlock(raw);
+parsed.cta_loop = forceCtaLoop(topic, parsed.cta_loop, parsed.hook);
 
   // Minimal validation (to reduce broken outputs)
   if (!parsed.hook || !parsed.body || !parsed.cta_loop || !parsed.comment_q || !parsed.luma_prompt) {
