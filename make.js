@@ -629,6 +629,7 @@ parsed.cta_loop = forceCtaLoop(topic, parsed.cta_loop, parsed.hook);
       "You are a Korean Shorts scriptwriter. Output only the labeled fields. No markdown, no JSON."
     );
     const parsed2 = parseShortsBlock(raw2);
+    parsed2.cta_loop = forceCtaLoop(topic, parsed2.cta_loop, parsed2.hook);
     return { ...parsed2, age_bucket: tpl.bucket, driver: tpl.driver };
   }
 
