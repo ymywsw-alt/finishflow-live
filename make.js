@@ -571,6 +571,21 @@ async function generateHotTopics(seedTopic, count, ageBucket) {
 
   return anchored.slice(0, Math.max(10, n));
 }
+function forceHook(topic, hook) {
+  if (!hook || hook.length < 10) {
+    return `${topic}, 지금 방치하면 위험합니다.`;
+  }
+
+  // 약한 패턴 필터
+  const weakWords = ["중요합니다", "알아보겠습니다", "소개합니다", "설명합니다"];
+  const weak = weakWords.some(w => hook.includes(w));
+
+  if (weak) {
+    return `${topic}, 대부분이 모르는 위험 신호가 있습니다.`;
+  }
+
+  return hook;
+}
 
 async function generateOneShort({ topic, ageBucket, idx, seedHint }) {
   const tpl = ageBucketTemplate(ageBucket);
@@ -583,6 +598,7 @@ async function generateOneShort({ topic, ageBucket, idx, seedHint }) {
   );
 
   const parsed = parseShortsBlock(raw);
+const parsed = parseShortsBlock(raw);
 
   // Minimal validation (to reduce broken outputs)
   if (!parsed.hook || !parsed.body || !parsed.cta_loop || !parsed.comment_q || !parsed.luma_prompt) {
